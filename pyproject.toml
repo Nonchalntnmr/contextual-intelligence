@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "contextual-intelligence"
+version = "0.1.0"
+description = "Personal CI: a research prototype of a user-owned, outcome-learned context layer in front of foundation models"
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [{ name = "Nishanth Revuri" }]
+
+# The core (memory, sovereignty, policies, observatory, mock model) needs only these.
+# Exact versions known to work are pinned in requirements-lock.txt.
+dependencies = [
+  "numpy>=1.26",
+  "pydantic>=2.5",
+  "cryptography>=42",
+  "httpx>=0.27",
+]
+
+[project.optional-dependencies]
+# HTTP API and dashboard.
+api = ["fastapi>=0.110", "uvicorn>=0.29"]
+# Anthropic adapter. anthropic 1.x brings its own HTTP stack (httpx2).
+anthropic = ["anthropic>=1,<2"]
+# Experimental neural scorer (src/pcim/policy/neural.py). Not used by any gate.
+neural = ["torch>=2.2"]
+test = ["pytest>=8", "fastapi>=0.110"]
+all = ["contextual-intelligence[api,anthropic,neural,test]"]
+
+[project.scripts]
+pcim = "pcim.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+pcim = ["dashboard/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

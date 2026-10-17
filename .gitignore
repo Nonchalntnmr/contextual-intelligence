@@ -1,0 +1,13 @@
+.venv/
+__pycache__/
+*.egg-info/
+.pytest_cache/
+
+# Persona
+l data never enters version control: the local store, its key, and run logs.
+data/
+*.db
+*.db-wal
+*.db-shm
+*.key
+experiments/*/runs/
