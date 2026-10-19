@@ -3,114 +3,209 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Personal CI</title>
+<title>CI Workspace</title>
 <style>
-:root { --bg:#fafaf9; --fg:#1c1917; --muted:#57534e; --line:#e7e5e4; --card:#fff; --accent:#0f766e; --warn:#b45309; --bad:#b91c1c; }
-@media (prefers-color-scheme: dark) { :root { --bg:#0c0a09; --fg:#f5f5f4; --muted:#a8a29e; --line:#292524; --card:#1c1917; --accent:#2dd4bf; --warn:#f59e0b; --bad:#f87171; } }
-* { box-sizing:border-box; } body { margin:0; font:15px/1.5 system-ui,-apple-system,sans-serif; background:var(--bg); color:var(--fg); }
-header { padding:16px; border-bottom:1px solid var(--line); display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
-header h1 { font-size:17px; margin:0; } nav button { background:none; border:0; color:var(--muted); padding:6px 10px; cursor:pointer; font:inherit; }
-nav button.on { color:var(--fg); border-bottom:2px solid var(--accent); } main { max-width:980px; margin:0 auto; padding:16px; }
-.card { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:14px; margin-bottom:12px; }
-input, textarea, select { width:100%; font:inherit; padding:8px; border:1px solid var(--line); border-radius:6px; background:var(--bg); color:var(--fg); }
-textarea { min-height:80px; } button.act { background:var(--accent); color:#fff; border:0; border-radius:6px; padding:8px 14px; cursor:pointer; font:inherit; }
-button.ghost { background:none; border:1px solid var(--line); color:var(--fg); border-radius:6px; padding:4px 10px; cursor:pointer; font:inherit; }
-.row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; } .muted { color:var(--muted); font-size:13px; }
-table { width:100%; border-collapse:collapse; font-size:14px; } td, th { text-align:left; padding:6px; border-bottom:1px solid var(--line); vertical-align:top; }
-pre { white-space:pre-wrap; word-break:break-word; font-size:13px; } .tag { font-size:12px; padding:1px 6px; border-radius:4px; border:1px solid var(--line); }
-.warn { color:var(--warn); } .bad { color:var(--bad); } .hidden { display:none; }
+/* Dark-first developer tool: charcoal surfaces, cyan for action, violet for CI's own voice. */
+:root {
+  --bg:#0e1013; --panel:#15181d; --panel2:#1b1f26; --line:#272c35; --fg:#e7eaf0; --muted:#8b94a3;
+  --cyan:#3fd0e0; --violet:#a78bfa; --ok:#4ade80; --warn:#fbbf24; --bad:#f87171;
+  --mono: ui-monospace, "SF Mono", Menlo, monospace; --sans: system-ui, -apple-system, "Segoe UI", sans-serif;
+  color-scheme: dark;
+}
+* { box-sizing:border-box; }
+body { margin:0; background:var(--bg); color:var(--fg); font:14.5px/1.55 var(--sans); }
+header { display:flex; gap:14px; align-items:center; flex-wrap:wrap; padding:12px max(16px,env(safe-area-inset-left,0px)); border-bottom:1px solid var(--line); background:var(--panel); position:sticky; top:0; z-index:5; }
+.brand { font-weight:650; letter-spacing:.01em; } .brand b { color:var(--cyan); }
+nav { display:flex; gap:2px; flex-wrap:wrap; }
+nav button { background:none; border:0; color:var(--muted); padding:6px 10px; border-radius:6px; cursor:pointer; font:inherit; }
+nav button.on { color:var(--fg); background:var(--panel2); }
+.status { font-family:var(--mono); font-size:12px; color:var(--muted); }
+.status .halted { color:var(--bad); font-weight:600; }
+main { padding:16px max(16px,env(safe-area-inset-right,0px)) 40px max(16px,env(safe-area-inset-left,0px)); max-width:1400px; margin:0 auto; }
+.grid { display:grid; grid-template-columns: 260px minmax(0,1fr) 340px; gap:14px; align-items:start; }
+@media (max-width: 1100px) { .grid { grid-template-columns: 1fr; } }
+.card { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:14px; min-width:0; }
+.card + .card { margin-top:12px; }
+h2 { font-size:13px; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); margin:0 0 10px; font-weight:600; }
+h1 { font-size:20px; margin:0 0 4px; text-wrap:balance; }
+input, textarea, select { width:100%; background:var(--bg); color:var(--fg); border:1px solid var(--line); border-radius:8px; padding:8px 10px; font:inherit; }
+textarea { min-height:70px; resize:vertical; }
+input:focus, textarea:focus, select:focus, button:focus-visible { outline:2px solid var(--cyan); outline-offset:1px; }
+button.act { background:var(--cyan); color:#06151a; border:0; border-radius:8px; padding:8px 14px; font-weight:600; cursor:pointer; font:inherit; }
+button.ghost { background:none; color:var(--fg); border:1px solid var(--line); border-radius:8px; padding:5px 10px; cursor:pointer; font:inherit; font-size:13px; }
+button.danger { background:var(--bad); color:#1a0505; border:0; border-radius:8px; padding:8px 14px; font-weight:700; cursor:pointer; }
+.row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; } .col { display:grid; gap:8px; }
+.muted { color:var(--muted); font-size:13px; } .mono { font-family:var(--mono); font-size:12.5px; }
+.plist button { width:100%; text-align:left; background:none; border:1px solid transparent; color:var(--fg); padding:8px 10px; border-radius:8px; cursor:pointer; font:inherit; }
+.plist button.on { border-color:var(--line); background:var(--panel2); }
+.chip { display:inline-block; font-family:var(--mono); font-size:11.5px; padding:1px 7px; border-radius:999px; border:1px solid var(--line); color:var(--muted); }
+.chip.succeeded { color:var(--ok); border-color:#1f4d33; } .chip.awaiting_approval { color:var(--warn); border-color:#5a4612; }
+.chip.denied, .chip.failed, .chip.cancelled, .chip.expired, .chip.interrupted { color:var(--bad); border-color:#5a2121; }
+.chip.running, .chip.approved { color:var(--cyan); border-color:#14505a; }
+.chip.model { color:var(--violet); border-color:#3d3366; }
+.msgs { display:grid; gap:10px; max-height:58vh; overflow:auto; padding-right:4px; }
+.msg { padding:10px 12px; border-radius:10px; background:var(--panel2); white-space:pre-wrap; word-break:break-word; }
+.msg.user { border-left:3px solid var(--cyan); } .msg.ci { border-left:3px solid var(--violet); }
+.msg.tool { background:none; border:1px dashed var(--line); font-family:var(--mono); font-size:12.5px; }
+.approve { border:1px solid #5a4612; background:#1d1808; border-radius:10px; padding:10px 12px; }
+pre { white-space:pre-wrap; word-break:break-word; font-family:var(--mono); font-size:12.5px; margin:6px 0 0; max-height:260px; overflow:auto; }
+ul.notes { margin:0; padding-left:1.1em; display:grid; gap:4px; }
+.modes { display:grid; grid-template-columns:repeat(auto-fit,minmax(240px,1fr)); gap:12px; }
+.mode { border:1px solid var(--line); border-radius:12px; padding:14px; background:var(--panel); cursor:pointer; text-align:left; color:var(--fg); font:inherit; }
+.mode.on { border-color:var(--violet); box-shadow:0 0 0 1px var(--violet) inset; }
+.mode b { display:block; font-size:16px; margin-bottom:4px; }
+table { width:100%; border-collapse:collapse; font-size:13.5px; } td, th { text-align:left; padding:6px; border-bottom:1px solid var(--line); vertical-align:top; }
+.tablewrap { overflow-x:auto; }
+@media (prefers-reduced-motion: no-preference) { .msg { animation: in .18s ease-out; } @keyframes in { from { opacity:.4; transform:translateY(3px);} to { opacity:1; transform:none; } } }
 </style>
 </head>
 <body>
 <header>
-  <h1>Personal CI</h1>
+  <span class="brand"><b>CI</b> Workspace</span>
   <nav id="tabs"></nav>
   <span style="flex:1"></span>
-  <input id="token" type="password" placeholder="API token" style="max-width:260px">
+  <span class="status" id="status"></span>
+  <input id="token" type="password" placeholder="API token" aria-label="API token" style="max-width:220px">
 </header>
 <main id="main"></main>
 <script>
-const tabs = ["Ask", "Memory", "Consent", "Receipts", "Learning", "Audit"];
-let tab = "Ask";
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
-try { $("#token").value = sessionStorage.getItem("pcim_token") || ""; } catch (e) {}
+const tabs = ["Workspace", "Autonomy", "Memory", "Consent", "Receipts", "Audit"];
+let tab = "Workspace", project = null;
+try { $("#token").value = sessionStorage.getItem("pcim_token") || ""; project = sessionStorage.getItem("pcim_project"); } catch (e) {}
 $("#token").addEventListener("change", e => { try { sessionStorage.setItem("pcim_token", e.target.value); } catch (_) {} render(); });
 async function api(method, path, body) {
-  const r = await fetch(path, { method, headers: { "Authorization": "Bearer " + $("#token").value, "Content-Type": "application/json" },
+  const r = await fetch(path, { method, headers: { Authorization: "Bearer " + $("#token").value, "Content-Type": "application/json" },
                                 body: body ? JSON.stringify(body) : undefined });
   const j = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error(j.detail ? JSON.stringify(j.detail) : r.status);
+  if (!r.ok) throw new Error(typeof j.detail === "string" ? j.detail : JSON.stringify(j.detail || r.status));
   return j;
 }
-function nav() { $("#tabs").innerHTML = tabs.map(t => `<button class="${t===tab?'on':''}" onclick="tab='${t}';render()">${t}</button>`).join(""); }
+function selectProject(id) { project = id; try { sessionStorage.setItem("pcim_project", id); } catch (_) {} render(); }
 async function render() {
-  nav(); const m = $("#main");
-  if (!$("#token").value) { m.innerHTML = `<div class="card">Paste the API token printed by <code>pcim init</code>.</div>`; return; }
-  try { m.innerHTML = await views[tab](); } catch (e) { m.innerHTML = `<div class="card bad">${esc(e.message)}</div>`; }
+  $("#tabs").innerHTML = tabs.map(t => `<button class="${t===tab?'on':''}" onclick="tab='${t}';render()">${t}</button>`).join("");
+  const m = $("#main");
+  if (!$("#token").value) { m.innerHTML = `<div class="card">Paste the API token printed by <span class="mono">pcim init</span>.</div>`; return; }
+  try {
+    const a = await api("GET", "/v1/autonomy");
+    $("#status").innerHTML = `mode: ${esc(a.mode)}${a.halted ? ' · <span class="halted">HALTED</span>' : ''}`;
+    m.innerHTML = await views[tab](a);
+    const box = document.querySelector(".msgs"); if (box) box.scrollTop = box.scrollHeight;
+  } catch (e) { m.innerHTML = `<div class="card" style="color:var(--bad)">${esc(e.message)}</div>`; }
+}
+function chip(s) { return `<span class="chip ${esc(s)}">${esc(String(s).replace(/_/g," "))}</span>`; }
+function taskLine(t) {
+  const arg = t.args?.path || t.args?.pattern || t.args?.reason || t.args?.text || "";
+  let extra = "";
+  if (t.status === "awaiting_approval") extra = `<div class="row" style="margin-top:6px"><button class="act" onclick="resolveTask('${t.id}',true)">Approve</button><button class="ghost" onclick="resolveTask('${t.id}',false)">Deny</button></div>`;
+  if (t.status === "running") extra = `<div class="row" style="margin-top:6px"><button class="ghost" onclick="act('POST','/v1/tasks/${t.id}/cancel')">Cancel</button></div>`;
+  if (t.tool === "write_file" && t.status === "succeeded" && !t.result?.undone) extra = `<div class="row" style="margin-top:6px"><button class="ghost" onclick="act('POST','/v1/tasks/${t.id}/undo')">Undo write</button></div>`;
+  const res = t.result ? `<details><summary class="muted">result</summary><pre>${esc(JSON.stringify(t.result, null, 1))}</pre></details>` : "";
+  return `<div>${chip(t.status)} <b class="mono">${esc(t.tool)}</b> <span class="muted">${esc(arg).slice(0,140)}</span>
+          ${t.reason ? `<div class="muted">${esc(t.reason)}</div>` : ""}${res}${extra}</div>`;
 }
 const views = {
-  async Ask() {
-    return `<div class="card"><textarea id="task" placeholder="Ask anything"></textarea>
-      <div class="row" style="margin-top:8px"><select id="prov" style="max-width:160px"><option>mock</option><option>anthropic</option><option>openai</option><option>google</option><option>local</option></select>
-      <input id="model" placeholder="model (optional)" style="max-width:220px">
-      <select id="mode" style="max-width:160px"><option value="">mode: learned</option><option>direct</option><option>explain</option><option>hint_first</option><option>socratic</option><option>verify_only</option></select>
-      <button class="act" onclick="doAsk()">Ask</button></div></div><div id="answer"></div>`;
+  async Workspace() {
+    const ps = await api("GET", "/v1/projects");
+    if (!project && ps.length) project = ps[0].id;
+    const list = ps.map(p => `<button class="${p.id===project?'on':''}" onclick="selectProject('${p.id}')">${esc(p.name)}<div class="muted">${esc(p.updated_at.slice(0,10))}</div></button>`).join("");
+    const left = `<div class="card"><h2>Projects</h2><div class="plist col">${list || '<span class="muted">No projects yet.</span>'}</div></div>
+      <div class="card"><h2>New project</h2><div class="col"><input id="pn" placeholder="Name"><textarea id="po" placeholder="What are you trying to achieve?"></textarea><button class="act" onclick="newProject()">Create</button></div></div>`;
+    if (!project) return `<div class="grid"><div>${left}</div><div class="card">Create a project to start.</div><div></div></div>`;
+    const [{ project: p, briefing: b }, ses, tasks] = await Promise.all([api("GET", `/v1/projects/${project}`),
+      api("GET", `/v1/projects/${project}/session`), api("GET", `/v1/tasks?project_id=${project}`)]);
+    const notes = (title, xs) => xs.length ? `<h2 style="margin-top:12px">${title}</h2><ul class="notes">${xs.map(n => `<li>${esc(n.text)} ${n.source!=="user"?chip("model-written"):""}</li>`).join("")}</ul>` : "";
+    const ev = ses.events.map(e => e.role === "tool" ? `<div class="msg tool">${taskLine(e.task)}</div>`
+      : `<div class="msg ${e.role}">${e.role==="ci" ? '<span class="chip model">CI</span> ' : ''}${esc(e.text)}</div>`).join("");
+    const pending = tasks.filter(t => t.status === "awaiting_approval");
+    const center = `<div class="card"><h1>${esc(p.name)}</h1><div class="muted">${esc(p.objective || "No objective set.")}</div>
+        ${notes("Open questions", b.open_questions)}${notes("Decisions", b.decisions)}${notes("Next steps", b.next_steps)}
+        ${b.last_session ? `<h2 style="margin-top:12px">Last session</h2><ul class="notes">${b.last_session.lines.map(l => `<li>${esc(l)}</li>`).join("")}</ul>` : ""}</div>
+      <div class="card"><h2>Conversation ${ses.session_id ? `<span class="muted mono">${esc(ses.status||"")}</span>` : ""}</h2>
+        <div class="msgs">${ev || '<span class="muted">Start a session. CI begins from the briefing above.</span>'}</div>
+        ${pending.length ? `<div class="approve" style="margin-top:10px"><b>Waiting for your approval</b>${pending.map(taskLine).join("")}</div>` : ""}
+        <div class="col" style="margin-top:10px"><textarea id="msg" placeholder="Message CI…" onkeydown="if(event.key==='Enter'&&(event.metaKey||event.ctrlKey))send()"></textarea>
+        <div class="row"><select id="prov" style="max-width:150px"><option>mock</option><option>anthropic</option></select>
+        <input id="model" placeholder="model (optional)" style="max-width:200px">
+        <button class="act" onclick="send()">Send</button><button class="ghost" onclick="send(true)">New session</button>
+        <button class="ghost" onclick="act('POST','/v1/projects/${project}/session/close')">Close session</button></div>
+        <div class="muted">mock is a labelled test double, not a model. Connect a provider (ANTHROPIC_API_KEY) for real reasoning.</div></div></div>`;
+    const w = b.workspace;
+    const right = `<div class="card"><h2>Workspace</h2>${w ? `<div class="mono">${esc(w.root)}</div><div class="muted">tests: ${w.can_run_tests?"configured":"not configured"} · writes: ${w.can_write?"allowed with approval":"off"}</div>` : '<div class="muted">No folder authorized. File tools are refused.</div>'}
+        <details ${w?"":"open"}><summary class="muted">Authorize a folder</summary><div class="col" style="margin-top:8px">
+        <input id="wr" placeholder="/path/to/project"><input id="wa" placeholder='test command, e.g. pytest -q'>
+        <label class="row muted"><input type="checkbox" id="ww" style="width:auto"> allow writes (each still needs approval)</label>
+        <div class="muted">Files CI reads here are sent to the model provider you chat with. Secret-looking files are never read.</div>
+        <button class="ghost" onclick="authorize()">Authorize</button></div></details></div>
+      <div class="card"><h2>Add a note</h2><div class="col"><select id="nk"><option value="open_question">open question</option><option value="decision">decision</option><option value="next_step">next step</option></select>
+        <input id="nt" placeholder="Note"><button class="ghost" onclick="addNote()">Add</button></div></div>
+      <div class="card"><h2>Activity</h2><div class="col">${tasks.slice(0,25).map(taskLine).join("") || '<span class="muted">Nothing yet.</span>'}</div></div>`;
+    return `<div class="grid"><div>${left}</div><div>${center}</div><div>${right}</div></div>`;
+  },
+  async Autonomy(a) {
+    const ps = await api("GET", "/v1/projects");
+    const card = (m, title, sub, items) => `<button class="mode ${a.mode===m?'on':''}" onclick="setMode('${m}')"><b>${title}</b><span class="muted">${sub}</span><ul class="notes" style="margin-top:8px">${items.map(i=>`<li>${i}</li>`).join("")}</ul></button>`;
+    return `<div class="card"><div class="row" style="justify-content:space-between"><h1>Autonomy</h1>
+      ${a.halted ? `<button class="act" onclick="act('POST','/v1/autonomy/resume')">Resume execution</button>` : `<button class="danger" onclick="if(confirm('Stop everything now? Running tasks are killed.'))act('POST','/v1/autonomy/halt')">Stop all</button>`}</div>
+      <p class="muted">Enforced by the server. Reading and notes always run; running code and writing files need approval unless a scoped grant below covers them.</p>
+      <div class="modes">${card("copilot","Copilot","Acts only when you ask",["Reads and searches on request","Every run and write needs approval","No background work"])}
+      ${card("collaborative","Collaborative","Default · proposes, you approve",["Investigates and plans on its own","Consequential actions need approval","Keeps you in the loop"])}
+      ${card("autonomous","Autonomous","Only within grants you define",["Runs pre-approved tools within limits","Grants expire and can be revoked instantly","Never widens its own permissions"])}</div></div>
+      <div class="card"><h2>Scoped grants</h2><div class="tablewrap"><table><tr><th>kind</th><th>project</th><th>scope</th><th>used</th><th>expires</th><th></th></tr>
+      ${a.grants.map(g => `<tr><td>${esc(g.kind)}</td><td class="mono">${esc((ps.find(p=>p.id===g.project_id)||{}).name||g.project_id)}</td>
+        <td class="mono">${esc(g.kind==="workspace" ? g.spec.root : g.spec.tools.join(", ") + " · max " + g.spec.max_actions + " actions / " + g.spec.max_seconds + "s")}</td>
+        <td>${g.used_actions}</td><td class="muted">${esc((g.expires_at||"never").slice(0,16))}</td>
+        <td>${g.revoked_at ? '<span class="muted">revoked</span>' : `<button class="ghost" onclick="act('DELETE','/v1/autonomy/grants/${g.id}')">Revoke</button>`}</td></tr>`).join("")}</table></div>
+      <div class="row" style="margin-top:10px"><select id="gp" style="max-width:220px">${ps.map(p=>`<option value="${p.id}">${esc(p.name)}</option>`).join("")}</select>
+        <select id="gt" style="max-width:180px"><option>run_tests</option><option>write_file</option></select>
+        <input id="gn" type="number" value="5" min="1" max="200" style="max-width:90px" aria-label="max actions">
+        <input id="gm" type="number" value="60" min="1" style="max-width:90px" aria-label="minutes until expiry">
+        <button class="ghost" onclick="grant()">Grant</button><span class="muted">tool · max actions · minutes</span></div></div>`;
   },
   async Memory() {
     const items = await api("GET", "/v1/memory");
-    const rows = items.map(i => `<tr><td><span class="tag">${esc(i.kind)}</span> ${i.pinned?"📌":""}</td><td>${esc(i.content)}
-      ${i.flags.includes("contains_instructions")?'<div class="warn muted">contains instruction-like text — withheld until confirmed</div>':""}
-      ${i.flags.includes("conflicted")?'<div class="warn muted">conflicts with another note</div>':""}
-      <div class="muted">${esc(i.source)} · ${esc(i.trust)} · ${esc(i.sensitivity)} · since ${esc((i.valid_from||"").slice(0,10))}</div></td>
-      <td class="row"><button class="ghost" onclick="act('POST','/v1/memory/${i.id}/pin?pinned=${!i.pinned}')">${i.pinned?"unpin":"pin"}</button>
-      <button class="ghost" onclick="act('POST','/v1/memory/${i.id}/confirm')">confirm</button>
-      <button class="ghost" onclick="act('POST','/v1/memory/${i.id}/retract')">retract</button>
-      <button class="ghost bad" onclick="if(confirm('Delete permanently? The key is destroyed; this cannot be undone.'))act('DELETE','/v1/memory/${i.id}')">delete</button></td></tr>`).join("");
-    return `<div class="card"><div class="row"><input id="mem" placeholder="Tell CI something about you" style="flex:1">
-      <select id="kind" style="max-width:150px"><option>fact</option><option>preference</option><option>constraint</option><option>goal</option><option>skill</option><option>episode</option></select>
-      <button class="act" onclick="addMem()">Remember</button></div></div>
-      <div class="card"><table><tr><th>kind</th><th>item</th><th></th></tr>${rows || '<tr><td colspan=3 class="muted">Nothing yet.</td></tr>'}</table></div>`;
+    return `<div class="card"><h2>Collaboration preference</h2><div class="row"><input id="pt" placeholder="topic, e.g. explanations" style="max-width:220px"><input id="pv" placeholder="e.g. skip the basics" style="flex:1"><button class="ghost" onclick="pref()">Save</button></div>
+      <div class="muted">Applied to every new session. Stored as a pinned preference you can edit or delete below.</div></div>
+      <div class="card"><h2>What CI knows</h2><div class="tablewrap"><table>${items.map(i => `<tr><td>${chip(i.kind)}${i.pinned?" "+chip("pinned"):""}</td><td>${esc(i.content)}<div class="muted">${esc(i.source)} · ${esc(i.trust)} · since ${esc(i.valid_from.slice(0,10))}</div></td>
+      <td class="row"><button class="ghost" onclick="act('POST','/v1/memory/${i.id}/retract')">retract</button><button class="ghost" onclick="if(confirm('Delete permanently?'))act('DELETE','/v1/memory/${i.id}')">delete</button></td></tr>`).join("") || '<tr><td class="muted">Nothing yet.</td></tr>'}</table></div></div>`;
   },
   async Consent() {
     const gs = await api("GET", "/v1/consent");
-    return `<div class="card"><p class="muted">Nothing reaches a model provider without a grant here. Revocation is immediate.</p><table><tr><th>source</th><th>purpose</th><th>provider</th><th>ceiling</th><th></th></tr>
-      ${gs.map(g => `<tr><td>${esc(g.source)}</td><td>${esc(g.purpose)}</td><td>${esc(g.provider)}</td><td>${esc(g.max_sensitivity)}</td>
-      <td>${g.active?`<button class="ghost" onclick="act('DELETE','/v1/consent/${g.id}')">revoke</button>`:'<span class="muted">revoked</span>'}</td></tr>`).join("")}</table></div>`;
+    return `<div class="card"><h2>Consent</h2><div class="tablewrap"><table><tr><th>source</th><th>purpose</th><th>provider</th><th>ceiling</th><th></th></tr>${gs.map(g => `<tr><td>${esc(g.source)}</td><td>${esc(g.purpose)}</td><td>${esc(g.provider)}</td><td>${esc(g.max_sensitivity)}</td><td>${g.active?`<button class="ghost" onclick="act('DELETE','/v1/consent/${g.id}')">revoke</button>`:'<span class="muted">revoked</span>'}</td></tr>`).join("")}</table></div></div>`;
   },
   async Receipts() {
     const xs = (await api("GET", "/v1/interactions")).reverse().slice(0, 50);
-    return `<div class="card"><table><tr><th>when</th><th>provider</th><th>notes sent</th><th>cost</th><th>reward</th></tr>
-      ${xs.map(x => `<tr><td><a href="#" onclick="showReceipt('${x.id}');return false">${esc(x.ts.slice(0,19))}</a></td><td>${esc(x.provider)}/${esc(x.model)}</td>
-      <td>${x.selected.length}</td><td>${x.cost_usd==null?'<span class="warn">unknown</span>':'$'+x.cost_usd.toFixed(5)}</td><td>${x.reward==null?"—":x.reward.toFixed(2)}</td></tr>`).join("")}</table></div><div id="rc"></div>`;
-  },
-  async Learning() {
-    const [mt, dna] = await Promise.all([api("GET", "/v1/metrics"), api("GET", "/v1/dna")]);
-    return `<div class="card"><b>Metrics</b><p class="muted">${esc(mt.caveat)}</p><pre>${esc(JSON.stringify({interactions: mt.interactions, with_feedback: mt.with_feedback, mean_reward: mt.mean_reward, reward_curve_per_10: mt.reward_curve_per_10, by_provider: mt.by_provider}, null, 1))}</pre></div>
-      <div class="card"><b>Intelligence DNA</b><pre>${esc(JSON.stringify(dna, null, 1))}</pre></div>`;
+    return `<div class="card"><h2>One-shot receipts</h2><div class="tablewrap"><table><tr><th>when</th><th>provider</th><th>notes</th><th>cost</th></tr>${xs.map(x => `<tr><td class="mono">${esc(x.ts.slice(0,19))}</td><td>${esc(x.provider)}/${esc(x.model)}</td><td>${x.selected.length}</td><td>${x.cost_usd==null?'<span style="color:var(--warn)">unknown</span>':'$'+x.cost_usd.toFixed(5)}</td></tr>`).join("")}</table></div></div>`;
   },
   async Audit() {
-    const a = await api("GET", "/v1/audit?limit=200");
-    return `<div class="card">Chain ${a.chain_ok?'<b>verified</b>':'<b class="bad">BROKEN at '+a.first_bad_seq+'</b>'} · head <code>${esc(a.head.slice(0,16))}…</code>
-      <table>${a.entries.reverse().map(e => `<tr><td class="muted">${esc(e.ts.slice(0,19))}</td><td>${esc(e.event)}</td><td><pre>${esc(JSON.stringify(e.payload))}</pre></td></tr>`).join("")}</table></div>`;
+    const a = await api("GET", "/v1/audit?limit=300");
+    return `<div class="card"><h2>Audit log</h2><div class="muted">Chain ${a.chain_ok ? "verified" : "BROKEN at " + a.first_bad_seq} · head <span class="mono">${esc(a.head.slice(0,16))}…</span></div>
+      <div class="tablewrap"><table>${a.entries.reverse().map(e => `<tr><td class="mono muted">${esc(e.ts.slice(0,19))}</td><td class="mono">${esc(e.event)}</td><td class="mono muted">${esc(JSON.stringify(e.payload)).slice(0,220)}</td></tr>`).join("")}</table></div></div>`;
   },
 };
-async function act(method, path) { try { await api(method, path); render(); } catch (e) { alert(e.message); } }
-async function addMem() { await api("POST", "/v1/memory", { content: $("#mem").value, kind: $("#kind").value }); render(); }
-async function doAsk() {
-  const out = $("#answer"); out.innerHTML = `<div class="card muted">…</div>`;
-  try {
-    const r = await api("POST", "/v1/ask", { task: $("#task").value, provider: $("#prov").value, model: $("#model").value || null, assist_mode: $("#mode").value || null });
-    out.innerHTML = `<div class="card"><pre>${esc(r.text)}</pre><div class="row">
-      ${[1,2,3,4,5].map(n => `<button class="ghost" onclick="fb('${r.interaction_id}',{rating:${n}})">${n}</button>`).join("")}
-      <button class="ghost" onclick="fb('${r.interaction_id}',{task_success:true})">it worked</button>
-      <button class="ghost" onclick="fb('${r.interaction_id}',{task_success:false})">it failed</button>
-      <button class="ghost" onclick="fb('${r.interaction_id}',{corrected:true})">I had to correct it</button></div></div>
-      <div class="card"><b>Context receipt</b> — exactly what was sent to ${esc(r.receipt.provider)}<pre>${esc(JSON.stringify(r.receipt, null, 1))}</pre></div>`;
-  } catch (e) { out.innerHTML = `<div class="card bad">${esc(e.message)}</div>`; }
+async function act(method, path, body) { try { await api(method, path, body); } catch (e) { alert(e.message); } render(); }
+async function newProject() { const r = await api("POST", "/v1/projects", { name: $("#pn").value, objective: $("#po").value }); selectProject(r.id); }
+async function send(fresh) {
+  const message = $("#msg").value.trim(); if (!message) return;
+  $("#msg").value = "";
+  try { await api("POST", `/v1/projects/${project}/chat`, { message, provider: $("#prov").value, model: $("#model").value || null, new_session: !!fresh }); }
+  catch (e) { alert(e.message); }
+  render();
 }
-async function fb(id, s) { const r = await api("POST", "/v1/feedback/" + id, s); alert("Recorded. Reward " + (r.reward == null ? "none" : r.reward.toFixed(2))); }
-async function showReceipt(id) { const r = await api("GET", "/v1/interactions/" + id); $("#rc").innerHTML = `<div class="card"><pre>${esc(JSON.stringify(r, null, 1))}</pre></div>`; }
+async function resolveTask(id, ok) {
+  if (ok) return act("POST", `/v1/tasks/${id}/approve`);
+  const reason = prompt("Why deny? (CI will see this)") || "";
+  return act("POST", `/v1/tasks/${id}/deny`, { reason });
+}
+async function authorize() {
+  const cmd = $("#wa").value.trim();
+  await act("POST", `/v1/projects/${project}/workspace`, { root: $("#wr").value, run_argv: cmd ? cmd.split(/\s+/) : null, allow_write: $("#ww").checked });
+}
+async function addNote() { await act("POST", `/v1/projects/${project}/notes`, { kind: $("#nk").value, text: $("#nt").value }); }
+async function setMode(mode) { await act("PUT", "/v1/autonomy", { mode }); }
+async function grant() { await act("POST", "/v1/autonomy/grants", { project_id: $("#gp").value, tools: [$("#gt").value], max_actions: +$("#gn").value, ttl_minutes: +$("#gm").value }); }
+async function pref() { await act("POST", "/v1/preferences", { topic: $("#pt").value, value: $("#pv").value }); }
 render();
 </script>
 </body>

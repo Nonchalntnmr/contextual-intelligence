@@ -74,6 +74,25 @@ class ModelResponse:
     refusal: bool = False
 
 
+@dataclasses.dataclass
+class AgentStep:
+    """One model turn in a tool-using session.
+
+    `content` is the provider-native assistant content, appended back unchanged on the
+    next request. (Current Claude models bind thinking blocks to the conversation, so
+    history must be append-only.)
+    """
+
+    content: list
+    text: str
+    tool_uses: list[dict]  # [{"id", "name", "input"}]
+    stop_reason: str
+    usage: Usage
+    cost_usd: float | None
+    model: str
+    refusal: bool = False
+
+
 class Adapter(Protocol):
     provider: str
     model: str

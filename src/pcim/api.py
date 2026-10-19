@@ -88,6 +88,50 @@ class ProbeIn(BaseModel):
     assisted: bool = False
 
 
+class ProjectIn(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+    objective: str = Field(default="", max_length=4000)
+    success_criteria: str = Field(default="", max_length=4000)
+
+class ProjectPatch(BaseModel):
+    name: str | None = None
+    objective: str | None = None
+    success_criteria: str | None = None
+
+class NoteIn(BaseModel):
+    kind: str
+    text: str = Field(min_length=1, max_length=2000)
+
+class WorkspaceIn(BaseModel):
+    root: str
+    run_argv: list[str] | None = None
+    allow_write: bool = False
+    run_timeout_s: int = Field(default=300, ge=1, le=3600)
+
+class ChatIn(BaseModel):
+    message: str = Field(min_length=1, max_length=50_000)
+    provider: str = "mock"
+    model: str | None = None
+    new_session: bool = False
+
+class ReasonIn(BaseModel):
+    reason: str = ""
+
+class ModeIn(BaseModel):
+    mode: str
+
+class GrantIn(BaseModel):
+    project_id: str
+    tools: list[str]
+    max_actions: int = 10
+    max_seconds: int = 900
+    ttl_minutes: int = 60
+
+class PrefIn(BaseModel):
+    topic: str = Field(min_length=1, max_length=60)
+    value: str = Field(min_length=1, max_length=300)
+
+
 def _item_out(i) -> dict:
     d = dataclasses.asdict(i)
     for k in ("valid_from", "valid_to", "recorded_at", "superseded_at"):
@@ -252,6 +296,138 @@ def create_app(ci: PersonalCI) -> FastAPI:
     @app.post("/v1/growth/probe")
     def probe(body: ProbeIn, uid: str = Depends(user)):
         return ci.probe(uid, body.skill, body.correct, body.assisted)
+
+    # ------------------------------------------------------------------ workspace slice
+    from .agent import Agent
+    from .governor import Governor
+    from .tasks import TaskQueue, TaskStateError
+    from .workspace import Workspace, WorkspaceError
+
+    ws = Workspace(ci)
+    queue = TaskQueue(ws, Governor(ws))
+    agent = Agent(ci, ws, queue)
+    queue.recover()  # nothing that was running when the server stopped is re-run
+    app.state.workspace, app.state.queue, app.state.agent = ws, queue, agent
+
+    def guard(fn, *a, **k):
+        try:
+            return fn(*a, **k)
+        except KeyError:
+            raise HTTPException(404, "not found")
+        except (WorkspaceError, ValueError) as e:
+            raise HTTPException(422, str(e))
+        except (TaskStateError, RuntimeError) as e:
+            raise HTTPException(409, str(e))
+
+    def turn_out(t):
+        return t.as_dict() if hasattr(t, "as_dict") else t
+
+    def project_out(p):
+        return dataclasses.asdict(p)
+
+    @app.get("/v1/projects")
+    def projects(uid: str = Depends(user)):
+        return [project_out(p) for p in ws.list_projects(uid)]
+
+    @app.post("/v1/projects")
+    def create_project(body: ProjectIn, uid: str = Depends(user)):
+        return project_out(guard(ws.create_project, uid, body.name, body.objective, body.success_criteria))
+
+    @app.get("/v1/projects/{pid}")
+    def project(pid: str, uid: str = Depends(user)):
+        return {"project": project_out(guard(ws.get_project, uid, pid)), "briefing": guard(ws.briefing, uid, pid)}
+
+    @app.patch("/v1/projects/{pid}")
+    def patch_project(pid: str, body: ProjectPatch, uid: str = Depends(user)):
+        return project_out(guard(ws.update_project, uid, pid, **body.model_dump()))
+
+    @app.delete("/v1/projects/{pid}")
+    def delete_project(pid: str, uid: str = Depends(user)):
+        return guard(ws.delete_project, uid, pid)
+
+    @app.post("/v1/projects/{pid}/notes")
+    def add_note(pid: str, body: NoteIn, uid: str = Depends(user)):
+        return guard(ws.add_note, uid, pid, body.kind, body.text, "user")
+
+    @app.post("/v1/projects/{pid}/notes/{nid}/resolve")
+    def resolve_note(pid: str, nid: str, uid: str = Depends(user)):
+        guard(ws.resolve_note, uid, pid, nid)
+        return {"ok": True}
+
+    @app.post("/v1/projects/{pid}/workspace")
+    def authorize(pid: str, body: WorkspaceIn, uid: str = Depends(user)):
+        aid = guard(ws.authorize_workspace, uid, pid, body.root, body.run_argv, body.allow_write, body.run_timeout_s)
+        return {"authorization_id": aid}
+
+    @app.post("/v1/projects/{pid}/chat")
+    def chat(pid: str, body: ChatIn, uid: str = Depends(user)):
+        guard(ws.get_project, uid, pid)
+        return turn_out(guard(agent.send, uid, pid, body.message, body.provider, body.model, body.new_session))
+
+    @app.get("/v1/projects/{pid}/session")
+    def session(pid: str, uid: str = Depends(user)):
+        guard(ws.get_project, uid, pid)
+        return guard(agent.transcript, uid, pid)
+
+    @app.post("/v1/projects/{pid}/session/close")
+    def close_session(pid: str, uid: str = Depends(user)):
+        guard(ws.get_project, uid, pid)
+        return {"reflection": guard(agent.close_session, uid, pid)}
+
+    @app.get("/v1/tasks")
+    def tasks(uid: str = Depends(user), project_id: str | None = None, status: str | None = None):
+        return [t.public() for t in queue.list(uid, project_id, status)]
+
+    @app.get("/v1/tasks/{tid}")
+    def task(tid: str, uid: str = Depends(user)):
+        return guard(queue.get, uid, tid).public()
+
+    @app.post("/v1/tasks/{tid}/approve")
+    def approve(tid: str, uid: str = Depends(user)):
+        return turn_out(guard(agent.resolve, uid, tid, True))
+
+    @app.post("/v1/tasks/{tid}/deny")
+    def deny(tid: str, body: ReasonIn, uid: str = Depends(user)):
+        return turn_out(guard(agent.resolve, uid, tid, False, body.reason))
+
+    @app.post("/v1/tasks/{tid}/cancel")
+    def cancel(tid: str, uid: str = Depends(user)):
+        return turn_out(guard(agent.cancel, uid, tid))
+
+    @app.post("/v1/tasks/{tid}/undo")
+    def undo(tid: str, uid: str = Depends(user)):
+        return guard(queue.undo, uid, tid)
+
+    @app.get("/v1/autonomy")
+    def autonomy(uid: str = Depends(user)):
+        return {"mode": ws.get_mode(uid), "halted": ws.is_halted(uid), "grants": ws.all_auths(uid)}
+
+    @app.put("/v1/autonomy")
+    def set_mode(body: ModeIn, uid: str = Depends(user)):
+        guard(ws.set_mode, uid, body.mode)
+        return {"mode": body.mode}
+
+    @app.post("/v1/autonomy/grants")
+    def grant_autonomy(body: GrantIn, uid: str = Depends(user)):
+        return {"authorization_id": guard(ws.grant_autonomy, uid, body.project_id, body.tools, body.max_actions,
+                                          body.max_seconds, body.ttl_minutes)}
+
+    @app.delete("/v1/autonomy/grants/{aid}")
+    def revoke_grant(aid: str, uid: str = Depends(user)):
+        return {"revoked": ws.revoke(uid, aid)}
+
+    @app.post("/v1/autonomy/halt")
+    def halt(uid: str = Depends(user)):
+        return queue.halt(uid)
+
+    @app.post("/v1/autonomy/resume")
+    def resume(uid: str = Depends(user)):
+        ws.set_halted(uid, False)
+        return {"halted": False}
+
+    @app.post("/v1/preferences")
+    def preference(body: PrefIn, uid: str = Depends(user)):
+        return guard(agent.set_collaboration_preference, uid, body.topic, body.value)
 
     dash = Path(str(resources.files("pcim") / "dashboard"))
     if dash.exists():

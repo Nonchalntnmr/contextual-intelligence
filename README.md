@@ -17,16 +17,17 @@ outcomes which context actually helps, and can prove what it sent and what it de
 
 | part | status |
 |---|---|
+| **Workspace slice**: projects, notes with provenance, sessions that resume from a compiled briefing, governed tools (read/list/search/git status/run tests/write/note), durable task queue with approvals, expiry, cancel, undo, halt; three autonomy modes enforced server-side (`workspace.py`, `governor.py`, `tools.py`, `tasks.py`, `agent.py`) | working, tested (66 tests); the full loop was run on a live server with a restart in the middle |
+| MCP server `pcim-mcp`: briefing, consent-filtered context, gated memory, notes, outcomes (`mcp_server.py`) | working against an in-memory MCP client; **not yet registered with a real agent** |
 | Temporal memory: bitemporal, supersession vs correction, conflicts, TTLs, lineage (`memory.py`) | working, tested |
-| Sovereignty: per-record encryption with crypto-shredding, consent per source × provider, lineage-aware egress guard, hash-chained audit, injection write-gating (`sovereignty/`) | working, tested (including "plaintext never on disk" and "deleted key cannot decrypt") |
+| Sovereignty: per-record encryption with crypto-shredding, consent per source × provider, lineage-aware egress, hash-chained audit, injection write-gating (`sovereignty/`) | working, tested |
 | Learned context policy: population EM prior, posterior-mean action, density-greedy knapsack (`policy/`) | working; validated in simulation only (G0b) |
-| G0/G0b simulator, runner, pre-registrations, deviation logs, reports (`observatory/`, `experiments/`) | working; results in `experiments/g0*/results/REPORT.md` |
-| Model adapters: mock (`adapters/`) | working |
-| Model adapters: Anthropic (official SDK), OpenAI-compatible, Gemini (`adapters/`) | tested against recorded wire formats; **no live call made** (no keys configured) |
-| Assistance-mode bandit, knowledge tracing (unassisted probes only), intent and VOI (`assist.py`, `growth.py`, `intent.py`) | experimental: implemented and unit-tested, not validated on people |
-| Continual learning: immutable snapshots, rollback, non-inferiority promotion gate (`learning.py`) | working, tested; off-policy evaluation is future work |
-| FastAPI backend + dashboard + `pcim` CLI | working (live-smoke-tested on localhost) |
-| Postgres/pgvector backend, Redis, Next.js frontend, Docker deployment | **not built** — deliberately deferred; see below |
+| G0/G0b simulator, runner, pre-registrations, deviation logs, reports (`observatory/`, `experiments/`) | working |
+| Model adapters: Anthropic (official SDK, incl. tool use), OpenAI-compatible, Gemini | tested against recorded wire formats; **no live call made** (no keys configured). Tool use exists for Anthropic only |
+| Mock model and mock agent | labelled test doubles, not models; they say so in every reply |
+| Assistance-mode bandit, knowledge tracing, intent and VOI | experimental: implemented and unit-tested, not validated on people |
+| FastAPI backend + dashboard (Workspace, Autonomy, Memory, Consent, Receipts, Audit) + `pcim` CLI | working on localhost |
+| Streaming to the UI, scheduled background work, OS-level sandbox, Postgres/pgvector, multi-user hosting | **not built**; see `docs/THREAT_MODEL.md` and `docs/IMPLEMENTATION_PLAN.md` |
 
 **Stack decisions**, which deviate from the brief on purpose:
 
@@ -40,12 +41,13 @@ outcomes which context actually helps, and can prove what it sent and what it de
 
 ```bash
 cd ~/projects/contextual-intelligence
-.venv/bin/python -m pytest -q                       # 45 tests, ~1.5 s
+.venv/bin/python -m pytest -q                       # 66 tests, ~4 s
 export PCIM_HOME=~/.pcim                             # where your encrypted store lives
 .venv/bin/pcim init --user nishanth --providers mock
 .venv/bin/pcim remember "I prefer concise answers" --kind preference
 .venv/bin/pcim ask "plan my week" --receipt
 .venv/bin/pcim serve                                 # dashboard at http://127.0.0.1:8765
+.venv/bin/pcim-mcp                                   # MCP server over stdio, for terminal agents
 ```
 
 **Real models.** Set `ANTHROPIC_API_KEY`, then use `--providers mock anthropic` at init and
@@ -63,6 +65,8 @@ run twice.
 ```
 
 ## Docs
+
+- `docs/EXISTING_SYSTEM_AUDIT.md`, `docs/CI_ARCHITECTURE.md`, `docs/IMPLEMENTATION_PLAN.md`, `docs/THREAT_MODEL.md` cover the workspace slice: what existed, what was built, the governor rules, and every threat with its control, test and residual risk.
 
 - `docs/RESEARCH.md` covers feasibility, the PCIM architecture with its math, the G0
   evidence, the G1–G3 programme, falsifiable hypotheses, the roadmap and the evidence bar.

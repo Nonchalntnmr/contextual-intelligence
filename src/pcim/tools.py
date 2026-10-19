@@ -1,0 +1,209 @@
+"""Typed tools the executor runs. Each takes validated arguments and the workspace spec.
+
+Nothing here decides whether a call is allowed. That is the governor's job, and it is
+asked twice, at proposal time and again right before execution. These functions only
+make sure a call, once allowed, cannot do more than it says:
+- every path goes through `jail()`;
+- output is capped;
+- run_tests uses the configured argv with no shell, a timeout, its own process group (so
+  cancel kills the children too), and an environment with keys and tokens removed.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import os
+import re
+import signal
+import subprocess
+import threading
+import time
+from pathlib import Path
+
+from .governor import is_secret, jail
+
+MAX_READ = 200_000
+MAX_WRITE = 500_000
+MAX_LIST = 500
+MAX_MATCHES = 200
+SKIP_DIRS = {".git", ".venv", "venv", "node_modules", "__pycache__", ".pytest_cache", ".mypy_cache", "dist", "build"}
+_SCRUB = re.compile(r"(KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|AUTH|COOKIE|SESSION)", re.IGNORECASE)
+_SCRUB_PREFIX = ("AWS_", "GITHUB_", "GH_", "ANTHROPIC", "OPENAI", "GEMINI", "GOOGLE_", "AZURE_", "PCIM_", "HF_")
+
+TOOL_SCHEMAS = {
+    "read_file": {"description": "Read a text file inside the authorized project workspace.",
+                  "input_schema": {"type": "object", "properties": {"path": {"type": "string", "description": "path relative to the workspace root"}},
+                                   "required": ["path"], "additionalProperties": False}},
+    "list_files": {"description": "List files in the workspace matching a glob (default **/*). Skips .git, virtualenvs, node_modules.",
+                   "input_schema": {"type": "object", "properties": {"pattern": {"type": "string"}},
+                                    "required": ["pattern"], "additionalProperties": False}},
+    "search_code": {"description": "Search workspace files for a regular expression. Returns path:line: text.",
+                    "input_schema": {"type": "object", "properties": {"pattern": {"type": "string"}, "glob": {"type": "string"}},
+                                     "required": ["pattern", "glob"], "additionalProperties": False}},
+    "git_status": {"description": "Show git status of the workspace (read-only).",
+                   "input_schema": {"type": "object", "properties": {}, "required": [], "additionalProperties": False}},
+    "run_tests": {"description": "Run the person's configured test command in the workspace. Needs approval unless an autonomous grant covers it.",
+                  "input_schema": {"type": "object", "properties": {"reason": {"type": "string", "description": "one line: why run tests now"}},
+                                   "required": ["reason"], "additionalProperties": False}},
+    "write_file": {"description": "Create or overwrite a text file in the workspace. Needs approval unless an autonomous grant covers it. The previous version is kept for undo.",
+                   "input_schema": {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"},
+                                                                     "reason": {"type": "string"}},
+                                    "required": ["path", "content", "reason"], "additionalProperties": False}},
+    "record_note": {"description": "Record an open question, decision, or next step on the project. It is shown to the person as model-written.",
+                    "input_schema": {"type": "object", "properties": {"kind": {"type": "string", "enum": ["open_question", "decision", "next_step"]},
+                                                                      "text": {"type": "string"}},
+                                     "required": ["kind", "text"], "additionalProperties": False}},
+}
+
+
+class ToolError(RuntimeError):
+    pass
+
+
+class Cancelled(RuntimeError):
+    pass
+
+
+def validate_args(tool: str, args: dict) -> dict:
+    schema = TOOL_SCHEMAS.get(tool)
+    if schema is None:
+        raise ToolError(f"unknown tool {tool}")
+    if not isinstance(args, dict):
+        raise ToolError("arguments must be an object")
+    props, required = schema["input_schema"]["properties"], schema["input_schema"]["required"]
+    extra = set(args) - set(props)
+    missing = [k for k in required if k not in args]
+    if extra or missing:
+        raise ToolError(f"bad arguments for {tool}: extra={sorted(extra)} missing={missing}")
+    for k, v in args.items():
+        if not isinstance(v, str):
+            raise ToolError(f"{tool}.{k} must be a string")
+        if "enum" in props[k] and v not in props[k]["enum"]:
+            raise ToolError(f"{tool}.{k} must be one of {props[k]['enum']}")
+    return args
+
+
+def scrubbed_env() -> dict:
+    return {k: v for k, v in os.environ.items() if not _SCRUB.search(k) and not k.startswith(_SCRUB_PREFIX)}
+
+
+def _iter_files(root: Path, pattern: str):
+    for p in root.glob(pattern or "**/*"):
+        rel = p.relative_to(root)
+        if any(part in SKIP_DIRS for part in rel.parts) or not p.is_file() or is_secret(rel):
+            continue
+        try:  # glob follows symlinks; keep only files that really live inside the root
+            p.resolve().relative_to(root)
+        except ValueError:
+            continue
+        yield p, rel
+
+
+def _sha(b: bytes) -> str:
+    return hashlib.sha256(b).hexdigest()
+
+
+class Executor:
+    def __init__(self):
+        self._procs: dict[str, subprocess.Popen] = {}
+        self._cancelled: set[str] = set()
+        self._lock = threading.Lock()
+
+    def cancel(self, task_id: str) -> bool:
+        with self._lock:
+            self._cancelled.add(task_id)
+            proc = self._procs.get(task_id)
+        if proc and proc.poll() is None:
+            try:
+                os.killpg(proc.pid, signal.SIGTERM)
+                time.sleep(0.2)
+                if proc.poll() is None:
+                    os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            return True
+        return False
+
+    def run(self, task_id: str, tool: str, args: dict, spec: dict) -> dict:
+        root = Path(spec["root"]).resolve()
+        if tool == "read_file":
+            p = jail(root, args["path"])
+            if not p.is_file():
+                raise ToolError(f"{args['path']} does not exist")
+            data = p.read_bytes()
+            if b"\x00" in data[:8192]:
+                raise ToolError(f"{args['path']} is binary")
+            return {"path": args["path"], "bytes": len(data), "truncated": len(data) > MAX_READ,
+                    "content": data[:MAX_READ].decode("utf-8", errors="replace")}
+        if tool == "list_files":
+            files = []
+            for _, rel in _iter_files(root, args.get("pattern") or "**/*"):
+                files.append(str(rel))
+                if len(files) >= MAX_LIST:
+                    break
+            return {"files": sorted(files), "truncated": len(files) >= MAX_LIST}
+        if tool == "search_code":
+            if len(args["pattern"]) > 200:
+                raise ToolError("pattern too long")
+            try:
+                rx = re.compile(args["pattern"])
+            except re.error as e:
+                raise ToolError(f"bad regex: {e}")
+            matches = []
+            for p, rel in _iter_files(root, args.get("glob") or "**/*"):
+                if p.stat().st_size > 1_000_000:
+                    continue
+                try:
+                    text = p.read_text(errors="strict")
+                except (UnicodeDecodeError, OSError):
+                    continue
+                for n, line in enumerate(text.splitlines(), 1):
+                    if rx.search(line):
+                        matches.append(f"{rel}:{n}: {line.strip()[:300]}")
+                        if len(matches) >= MAX_MATCHES:
+                            return {"matches": matches, "truncated": True}
+            return {"matches": matches, "truncated": False}
+        if tool == "git_status":
+            r = subprocess.run(["git", "-C", str(root), "status", "--porcelain=v1", "-b"], capture_output=True,
+                               text=True, timeout=15, env=scrubbed_env())
+            if r.returncode != 0:
+                raise ToolError(r.stderr.strip()[:500] or "not a git repository")
+            return {"status": r.stdout[:20_000]}
+        if tool == "write_file":
+            content = args["content"]
+            if len(content.encode()) > MAX_WRITE:
+                raise ToolError("content too large")
+            p = jail(root, args["path"], for_write=True)
+            before = p.read_bytes() if p.exists() else None
+            p.parent.mkdir(parents=True, exist_ok=True)
+            tmp = p.with_name(f".{p.name}.ci-tmp")
+            tmp.write_text(content)
+            os.replace(tmp, p)
+            return {"path": args["path"], "created": before is None, "bytes": len(content.encode()),
+                    "sha256_before": _sha(before) if before is not None else None,
+                    "sha256_after": _sha(content.encode()),
+                    "backup": before.decode("utf-8", errors="replace") if before is not None else None}
+        if tool == "run_tests":
+            argv, timeout = spec["run_argv"], int(spec.get("run_timeout_s", 300))
+            t0 = time.time()
+            proc = subprocess.Popen(argv, cwd=root, env=scrubbed_env(), stdout=subprocess.PIPE,
+                                    stderr=subprocess.PIPE, text=True, start_new_session=True)
+            with self._lock:
+                self._procs[task_id] = proc
+                if task_id in self._cancelled:
+                    self.cancel(task_id)
+            try:
+                out, err = proc.communicate(timeout=timeout)
+                timed_out = False
+            except subprocess.TimeoutExpired:
+                self.cancel(task_id)
+                out, err = proc.communicate()
+                timed_out = True
+            finally:
+                with self._lock:
+                    self._procs.pop(task_id, None)
+            if task_id in self._cancelled and not timed_out:
+                raise Cancelled("cancelled while running")
+            return {"argv": argv, "exit_code": proc.returncode, "timed_out": timed_out,
+                    "duration_s": round(time.time() - t0, 2), "stdout_tail": out[-6000:], "stderr_tail": err[-3000:]}
+        raise ToolError(f"{tool} is not executed by the executor")

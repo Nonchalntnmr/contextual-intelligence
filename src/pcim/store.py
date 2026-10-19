@@ -154,6 +154,64 @@ CREATE TABLE IF NOT EXISTS skills (
   updated_at TEXT NOT NULL,
   PRIMARY KEY (user_id, skill)
 );
+
+-- Workspace slice. Project content, transcripts, task arguments and results are sealed
+-- with the project's own key: deleting a project destroys that key.
+CREATE TABLE IF NOT EXISTS projects (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  key_id TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  status TEXT NOT NULL,
+  payload_ct BLOB NOT NULL
+);
+CREATE TABLE IF NOT EXISTS sessions (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  project_id TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  status TEXT NOT NULL,
+  provider TEXT,
+  model TEXT,
+  state_ct BLOB NOT NULL
+);
+CREATE INDEX IF NOT EXISTS sessions_project ON sessions(project_id, created_at);
+CREATE TABLE IF NOT EXISTS tasks (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  project_id TEXT NOT NULL,
+  session_id TEXT,
+  tool TEXT NOT NULL,
+  risk TEXT NOT NULL,
+  status TEXT NOT NULL,
+  requested_by TEXT NOT NULL,
+  tool_use_id TEXT,
+  authorization_id TEXT,
+  reason TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  approved_at TEXT,
+  started_at TEXT,
+  finished_at TEXT,
+  duration_ms REAL,
+  args_ct BLOB NOT NULL,
+  result_ct BLOB
+);
+CREATE INDEX IF NOT EXISTS tasks_project ON tasks(project_id, created_at);
+CREATE TABLE IF NOT EXISTS authorizations (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  project_id TEXT,
+  kind TEXT NOT NULL,
+  spec TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  expires_at TEXT,
+  revoked_at TEXT,
+  first_used_at TEXT,
+  used_actions INTEGER NOT NULL DEFAULT 0
+);
 """
 
 
@@ -271,7 +329,8 @@ class Store:
             self._db.execute("BEGIN")
             try:
                 key_ids = [r["id"] for r in self._db.execute("SELECT id FROM keys WHERE user_id=?", (user_id,))]
-                for table in ("items", "conflicts", "grants", "interactions", "policy_states", "skills"):
+                for table in ("items", "conflicts", "grants", "interactions", "policy_states", "skills",
+                              "projects", "sessions", "tasks", "authorizations"):
                     cur = self._db.execute(f"DELETE FROM {table} WHERE user_id=?", (user_id,))
                     counts[table] = cur.rowcount
                 self._db.execute("DELETE FROM users WHERE id=?", (user_id,))
@@ -633,6 +692,45 @@ class Store:
                 self._db.execute("ROLLBACK")
                 raise KeyError(f"no version {version} of {name} for {user_id}")
             self._db.execute("COMMIT")
+
+    # ---------------------------------------------------------------- sealed rows (workspace slice)
+    def new_project_key(self, user_id: str) -> str:
+        with self._lock:
+            return self._new_key(user_id)[0]
+
+    def seal_json(self, key_id: str, obj, aad: str) -> bytes:
+        with self._lock:
+            return seal(self._dek(key_id), json.dumps(obj, default=str).encode(), aad)
+
+    def open_json(self, key_id: str, blob: bytes | None, aad: str):
+        if blob is None:
+            return None
+        with self._lock:
+            return json.loads(unseal(self._dek(key_id), blob, aad))
+
+    def execute(self, sql: str, args: tuple = ()) -> sqlite3.Cursor:
+        """Single statement under the store lock (workspace modules own their SQL)."""
+        with self._lock:
+            return self._db.execute(sql, args)
+
+    def query(self, sql: str, args: tuple = ()) -> list[sqlite3.Row]:
+        with self._lock:
+            return self._db.execute(sql, args).fetchall()
+
+    def delete_project_rows(self, project_id: str, key_id: str) -> dict:
+        with self._lock:
+            self._db.execute("BEGIN")
+            try:
+                counts = {t: self._db.execute(f"DELETE FROM {t} WHERE project_id=?", (project_id,)).rowcount
+                          for t in ("sessions", "tasks", "authorizations")}
+                counts["projects"] = self._db.execute("DELETE FROM projects WHERE id=?", (project_id,)).rowcount
+                self._destroy_keys([key_id])
+                self._db.execute("COMMIT")
+            except Exception:
+                self._db.execute("ROLLBACK")
+                raise
+            self._flush_deleted()
+            return counts
 
     # ---------------------------------------------------------------- skills
     def put_skill(self, user_id: str, skill: str, state: dict) -> None:
