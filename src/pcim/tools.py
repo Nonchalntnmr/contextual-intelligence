@@ -164,6 +164,16 @@ class Executor:
                             return {"matches": matches, "truncated": True}
             return {"matches": matches, "truncated": False}
         if tool == "git_status":
+            # A folder with no repository of its own makes git walk up to an enclosing one. On a
+            # machine where $HOME is itself a repository that would mean listing (and leaking)
+            # the whole home directory, so the real top level is checked first.
+            top = subprocess.run(["git", "-C", str(root), "rev-parse", "--show-toplevel"], capture_output=True,
+                                 text=True, timeout=15, env=scrubbed_env())
+            if top.returncode != 0:
+                raise ToolError("not a git repository")
+            toplevel = Path(top.stdout.strip()).resolve()
+            if toplevel == Path.home().resolve() or toplevel in Path.home().resolve().parents:
+                raise ToolError("refusing git in the home-directory repository")
             r = subprocess.run(["git", "-C", str(root), "status", "--porcelain=v1", "-b"], capture_output=True,
                                text=True, timeout=15, env=scrubbed_env())
             if r.returncode != 0:
@@ -190,8 +200,9 @@ class Executor:
                                     stderr=subprocess.PIPE, text=True, start_new_session=True)
             with self._lock:
                 self._procs[task_id] = proc
-                if task_id in self._cancelled:
-                    self.cancel(task_id)
+                cancelled_early = task_id in self._cancelled
+            if cancelled_early:  # cancel arrived between "running" and Popen; outside the lock
+                self.cancel(task_id)
             try:
                 out, err = proc.communicate(timeout=timeout)
                 timed_out = False
