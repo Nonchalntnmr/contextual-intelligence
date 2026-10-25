@@ -53,6 +53,13 @@ TOOL_SCHEMAS = {
                     "input_schema": {"type": "object", "properties": {"kind": {"type": "string", "enum": ["open_question", "decision", "next_step"]},
                                                                       "text": {"type": "string"}},
                                      "required": ["kind", "text"], "additionalProperties": False}},
+    "record_claim": {"description": "Put one checkable claim you are making on the project's claim ledger, so it can be verified independently. "
+                                    "It stays unverified until a test or the person settles it; another model agreeing does not verify it.",
+                     "input_schema": {"type": "object", "properties": {
+                         "statement": {"type": "string", "description": "one specific, checkable claim"},
+                         "evidence": {"type": "string", "description": "ids of tasks (task_...), notes (note_...) or claims (clm_...) from this project that support it, comma-separated; empty if none"},
+                         "uncertainty": {"type": "string", "description": "what you are unsure about; empty if nothing"}},
+                         "required": ["statement", "evidence", "uncertainty"], "additionalProperties": False}},
 }
 
 

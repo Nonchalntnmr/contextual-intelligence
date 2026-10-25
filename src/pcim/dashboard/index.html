@@ -5,10 +5,10 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>CI Workspace</title>
 <style>
-/* Dark-first developer tool: charcoal surfaces, cyan for action, violet for CI's own voice. */
+/* Dark-first: near-black navy surfaces, cyan for action, violet for CI's own voice (palette from the build brief). */
 :root {
-  --bg:#0e1013; --panel:#15181d; --panel2:#1b1f26; --line:#272c35; --fg:#e7eaf0; --muted:#8b94a3;
-  --cyan:#3fd0e0; --violet:#a78bfa; --ok:#4ade80; --warn:#fbbf24; --bad:#f87171;
+  --bg:#080B12; --panel:#101827; --panel2:#162033; --line:#24324a; --fg:#F4F7FB; --muted:#91A2B8;
+  --cyan:#38D9FF; --violet:#8B5CF6; --ok:#2DD4BF; --warn:#F5A524; --bad:#f87171;
   --mono: ui-monospace, "SF Mono", Menlo, monospace; --sans: system-ui, -apple-system, "Segoe UI", sans-serif;
   color-scheme: dark;
 }
@@ -43,6 +43,13 @@ button.danger { background:var(--bad); color:#1a0505; border:0; border-radius:8p
 .chip.denied, .chip.failed, .chip.cancelled, .chip.expired, .chip.interrupted { color:var(--bad); border-color:#5a2121; }
 .chip.running, .chip.approved { color:var(--cyan); border-color:#14505a; }
 .chip.model { color:var(--violet); border-color:#3d3366; }
+.chip.verified, .chip.supported, .chip.available { color:var(--ok); border-color:#1b4d47; }
+.chip.contested { color:var(--warn); border-color:#5a4612; } .chip.refuted, .chip.unavailable { color:var(--bad); border-color:#5a2121; }
+.chip.corroborated { color:var(--cyan); border-color:#14505a; }
+.claim { border-top:1px solid var(--line); padding:10px 0; } .claim:first-of-type { border-top:0; }
+.assess { margin:6px 0 0 10px; padding-left:10px; border-left:2px solid var(--line); }
+.assess.refuted { border-color:var(--warn); } .assess.supported { border-color:var(--ok); }
+.msg.system { background:none; border:1px dashed var(--warn); color:var(--warn); }
 .msgs { display:grid; gap:10px; max-height:58vh; overflow:auto; padding-right:4px; }
 .msg { padding:10px 12px; border-radius:10px; background:var(--panel2); white-space:pre-wrap; word-break:break-word; }
 .msg.user { border-left:3px solid var(--cyan); } .msg.ci { border-left:3px solid var(--violet); }
@@ -71,7 +78,9 @@ table { width:100%; border-collapse:collapse; font-size:13.5px; } td, th { text-
 <script>
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
-const tabs = ["Workspace", "Autonomy", "Memory", "Consent", "Receipts", "Audit"];
+const tabs = ["Workspace", "Models", "Autonomy", "Memory", "Consent", "Receipts", "Audit"];
+const VENDORS = ["anthropic", "openai", "google", "local", "mock"];
+let lastTasks = [];
 let tab = "Workspace", project = null;
 try { $("#token").value = sessionStorage.getItem("pcim_token") || ""; project = sessionStorage.getItem("pcim_project"); } catch (e) {}
 $("#token").addEventListener("change", e => { try { sessionStorage.setItem("pcim_token", e.target.value); } catch (_) {} render(); });
@@ -95,6 +104,18 @@ async function render() {
   } catch (e) { m.innerHTML = `<div class="card" style="color:var(--bad)">${esc(e.message)}</div>`; }
 }
 function chip(s) { return `<span class="chip ${esc(s)}">${esc(String(s).replace(/_/g," "))}</span>`; }
+function claimLine(c) {
+  const as = c.assessments.map(a => `<div class="assess ${esc(a.verdict)}">${chip(a.verdict)} <span class="mono">${esc(a.by.provider)}:${esc(a.by.label || a.by.model)}</span> <span class="muted">${esc(a.independence)}</span>
+      <div>${esc(a.rationale)}</div>${a.counter_claim ? `<div><b>Counter-claim:</b> ${esc(a.counter_claim)}</div>` : ""}
+      ${a.check ? `<div class="muted">Would settle it: ${esc(a.check)}</div>` : ""}
+      ${a.evidence_withheld?.length ? `<div class="muted">Withheld from the verifier: ${a.evidence_withheld.map(w => `${esc(w.ref)} (${esc(w.reason)})`).join(", ")}</div>` : ""}</div>`).join("");
+  const settled = c.resolution ? `<div class="muted">Settled: ${esc(c.resolution.decision)} by ${esc(c.resolution.by)}${c.resolution.note ? " · " + esc(c.resolution.note) : ""}</div>` : "";
+  return `<div class="claim">${chip(c.status)} ${esc(c.statement)}
+    <div class="muted">${esc(c.author_label)} · evidence: ${c.evidence_refs.map(esc).join(", ") || "none"}</div>${as}${settled}
+    <div class="row" style="margin-top:6px"><button class="ghost" onclick="act('POST','/v1/projects/${project}/claims/${c.id}/verify',{})">Verify independently</button>
+    <button class="ghost" onclick="resolveClaim('${c.id}','verified')">Mark verified</button><button class="ghost" onclick="resolveClaim('${c.id}','refuted')">Mark refuted</button>
+    <button class="ghost" onclick="testClaim('${c.id}')">Settle with latest test run</button></div></div>`;
+}
 function taskLine(t) {
   const arg = t.args?.path || t.args?.pattern || t.args?.reason || t.args?.text || "";
   let extra = "";
@@ -113,26 +134,38 @@ const views = {
     const left = `<div class="card"><h2>Projects</h2><div class="plist col">${list || '<span class="muted">No projects yet.</span>'}</div></div>
       <div class="card"><h2>New project</h2><div class="col"><input id="pn" placeholder="Name"><textarea id="po" placeholder="What are you trying to achieve?"></textarea><button class="act" onclick="newProject()">Create</button></div></div>`;
     if (!project) return `<div class="grid"><div>${left}</div><div class="card">Create a project to start.</div><div></div></div>`;
-    const [{ project: p, briefing: b }, ses, tasks] = await Promise.all([api("GET", `/v1/projects/${project}`),
-      api("GET", `/v1/projects/${project}/session`), api("GET", `/v1/tasks?project_id=${project}`)]);
-    const notes = (title, xs) => xs.length ? `<h2 style="margin-top:12px">${title}</h2><ul class="notes">${xs.map(n => `<li>${esc(n.text)} ${n.source!=="user"?chip("model-written"):""}</li>`).join("")}</ul>` : "";
+    const [{ project: p, briefing: b, providers: provs }, ses, tasks, claims, models, disc] = await Promise.all([
+      api("GET", `/v1/projects/${project}`), api("GET", `/v1/projects/${project}/session`),
+      api("GET", `/v1/tasks?project_id=${project}`), api("GET", `/v1/projects/${project}/claims`),
+      api("GET", "/v1/models"), api("GET", `/v1/projects/${project}/disclosures`)]);
+    lastTasks = tasks;
+    const usable = models.filter(m => m.available && m.capabilities.includes("chat"));
+    const options = usable.map(m => `<option value="${esc(m.provider)}|${esc(m.model)}" ${provs.includes(m.vendor) ? "" : "disabled"}>${esc(m.label)}${provs.includes(m.vendor) ? "" : " (no access)"}</option>`).join("");
+    const notes = (title, xs) => xs.length ? `<h2 style="margin-top:12px">${title}</h2><ul class="notes">${xs.map(n => `<li>${esc(n.text)} ${n.source!=="user"?chip("model-written"):""}${n.by?.model ? ` <span class="muted mono">${esc(n.by.model)}</span>` : ""}</li>`).join("")}</ul>` : "";
     const ev = ses.events.map(e => e.role === "tool" ? `<div class="msg tool">${taskLine(e.task)}</div>`
       : `<div class="msg ${e.role}">${e.role==="ci" ? '<span class="chip model">CI</span> ' : ''}${esc(e.text)}</div>`).join("");
     const pending = tasks.filter(t => t.status === "awaiting_approval");
     const center = `<div class="card"><h1>${esc(p.name)}</h1><div class="muted">${esc(p.objective || "No objective set.")}</div>
+        ${p.constraints?.length ? `<h2 style="margin-top:12px">Constraints</h2><ul class="notes">${p.constraints.map(c => `<li>${esc(c)}</li>`).join("")}</ul>` : ""}
         ${notes("Open questions", b.open_questions)}${notes("Decisions", b.decisions)}${notes("Next steps", b.next_steps)}
         ${b.last_session ? `<h2 style="margin-top:12px">Last session</h2><ul class="notes">${b.last_session.lines.map(l => `<li>${esc(l)}</li>`).join("")}</ul>` : ""}</div>
       <div class="card"><h2>Conversation ${ses.session_id ? `<span class="muted mono">${esc(ses.status||"")}</span>` : ""}</h2>
         <div class="msgs">${ev || '<span class="muted">Start a session. CI begins from the briefing above.</span>'}</div>
         ${pending.length ? `<div class="approve" style="margin-top:10px"><b>Waiting for your approval</b>${pending.map(taskLine).join("")}</div>` : ""}
         <div class="col" style="margin-top:10px"><textarea id="msg" placeholder="Message CI…" onkeydown="if(event.key==='Enter'&&(event.metaKey||event.ctrlKey))send()"></textarea>
-        <div class="row"><select id="prov" style="max-width:150px"><option>mock</option><option>anthropic</option></select>
-        <input id="model" placeholder="model (optional)" style="max-width:200px">
+        <div class="row"><select id="prov" style="max-width:300px" aria-label="model">${options}</select>
         <button class="act" onclick="send()">Send</button><button class="ghost" onclick="send(true)">New session</button>
         <button class="ghost" onclick="act('POST','/v1/projects/${project}/session/close')">Close session</button></div>
-        <div class="muted">mock is a labelled test double, not a model. Connect a provider (ANTHROPIC_API_KEY) for real reasoning.</div></div></div>`;
+        <div class="muted">Models come from the registry (Models tab). The mock agent is a labelled test double, not a model.</div></div></div>
+      <div class="card"><h2>Claims and evidence</h2>${claims.map(claimLine).join("") || '<span class="muted">No claims yet. Models put checkable claims on the ledger with record_claim; you can add one too.</span>'}
+        <div class="row" style="margin-top:8px"><input id="cs" placeholder="A checkable claim" style="flex:1"><button class="ghost" onclick="addClaim()">Add claim</button></div>
+        <div class="muted">Another model agreeing makes a claim <i>corroborated</i>, never <i>verified</i>. Only a linked test run or your decision settles it.</div></div>`;
     const w = b.workspace;
-    const right = `<div class="card"><h2>Workspace</h2>${w ? `<div class="mono">${esc(w.root)}</div><div class="muted">tests: ${w.can_run_tests?"configured":"not configured"} · writes: ${w.can_write?"allowed with approval":"off"}</div>` : '<div class="muted">No folder authorized. File tools are refused.</div>'}
+    const access = `<div class="card"><h2>Model access</h2><div class="muted">Vendors that may receive this project's briefing, transcript and files. Checked before every request.</div>
+        <div class="col" style="margin-top:6px">${VENDORS.map(v => `<label class="row"><input type="checkbox" style="width:auto" ${provs.includes(v) ? "checked" : ""} onchange="toggleVendor('${v}', this.checked)"> ${v}</label>`).join("")}</div>
+        <details style="margin-top:8px"><summary class="muted">What each provider was sent (${disc.length})</summary><div class="col" style="margin-top:6px">${disc.slice(-12).reverse().map(d =>
+          `<div class="mono">${esc(d.at.slice(0,19))} ${esc(d.provider)}:${esc(d.model)}<div class="muted">${d.briefing_sha256 ? "briefing " + esc(d.briefing_sha256.slice(0,12)) + "… · " : ""}${d.memory_items.length} memory sent · ${d.memory_withheld.length} withheld</div></div>`).join("") || '<span class="muted">Nothing sent yet.</span>'}</div></details></div>`;
+    const right = access + `<div class="card"><h2>Workspace</h2>${w ? `<div class="mono">${esc(w.root)}</div><div class="muted">tests: ${w.can_run_tests?"configured":"not configured"} · writes: ${w.can_write?"allowed with approval":"off"}</div>` : '<div class="muted">No folder authorized. File tools are refused.</div>'}
         <details ${w?"":"open"}><summary class="muted">Authorize a folder</summary><div class="col" style="margin-top:8px">
         <input id="wr" placeholder="/path/to/project"><input id="wa" placeholder='test command, e.g. pytest -q'>
         <label class="row muted"><input type="checkbox" id="ww" style="width:auto"> allow writes (each still needs approval)</label>
@@ -142,6 +175,15 @@ const views = {
         <input id="nt" placeholder="Note"><button class="ghost" onclick="addNote()">Add</button></div></div>
       <div class="card"><h2>Activity</h2><div class="col">${tasks.slice(0,25).map(taskLine).join("") || '<span class="muted">Nothing yet.</span>'}</div></div>`;
     return `<div class="grid"><div>${left}</div><div>${center}</div><div>${right}</div></div>`;
+  },
+  async Models() {
+    const ms = await api("GET", "/v1/models");
+    return `<div class="card"><h1>Model network</h1><p class="muted">Every model CI can call, whether it is reachable now, and which vendor receives the data. Routing is deterministic: verification goes to a different vendor from the claim's author when one is available and authorized, never to the author itself, and never silently to a test double.</p>
+      <div class="tablewrap"><table><tr><th>model</th><th>vendor</th><th>transport</th><th>status</th><th>price / MTok in · out</th><th>verifier record</th></tr>
+      ${ms.map(m => `<tr><td><b>${esc(m.label)}</b><div class="mono muted">${esc(m.key)}</div></td><td>${esc(m.vendor)}</td><td>${esc(m.transport)}</td>
+        <td>${chip(m.available ? "available" : "unavailable")}<div class="muted">${esc(m.availability)}</div></td>
+        <td class="mono">${m.price_per_mtok ? `$${m.price_per_mtok.input} · $${m.price_per_mtok.output}` : '<span class="muted">unpriced</span>'}</td>
+        <td class="muted">${m.measured ? `${m.measured.assessments} assessments · ${m.measured.borne_out} borne out · ${m.measured.contradicted} contradicted` : "no data yet"}</td></tr>`).join("")}</table></div></div>`;
   },
   async Autonomy(a) {
     const ps = await api("GET", "/v1/projects");
@@ -154,7 +196,7 @@ const views = {
       ${card("autonomous","Autonomous","Only within grants you define",["Runs pre-approved tools within limits","Grants expire and can be revoked instantly","Never widens its own permissions"])}</div></div>
       <div class="card"><h2>Scoped grants</h2><div class="tablewrap"><table><tr><th>kind</th><th>project</th><th>scope</th><th>used</th><th>expires</th><th></th></tr>
       ${a.grants.map(g => `<tr><td>${esc(g.kind)}</td><td class="mono">${esc((ps.find(p=>p.id===g.project_id)||{}).name||g.project_id)}</td>
-        <td class="mono">${esc(g.kind==="workspace" ? g.spec.root : g.spec.tools.join(", ") + " · max " + g.spec.max_actions + " actions / " + g.spec.max_seconds + "s")}</td>
+        <td class="mono">${esc(g.kind==="workspace" ? g.spec.root : g.kind==="provider" ? "may receive project content: " + g.spec.vendor : g.spec.tools.join(", ") + " · max " + g.spec.max_actions + " actions / " + g.spec.max_seconds + "s")}</td>
         <td>${g.used_actions}</td><td class="muted">${esc((g.expires_at||"never").slice(0,16))}</td>
         <td>${g.revoked_at ? '<span class="muted">revoked</span>' : `<button class="ghost" onclick="act('DELETE','/v1/autonomy/grants/${g.id}')">Revoke</button>`}</td></tr>`).join("")}</table></div>
       <div class="row" style="margin-top:10px"><select id="gp" style="max-width:220px">${ps.map(p=>`<option value="${p.id}">${esc(p.name)}</option>`).join("")}</select>
@@ -189,9 +231,19 @@ async function newProject() { const r = await api("POST", "/v1/projects", { name
 async function send(fresh) {
   const message = $("#msg").value.trim(); if (!message) return;
   $("#msg").value = "";
-  try { await api("POST", `/v1/projects/${project}/chat`, { message, provider: $("#prov").value, model: $("#model").value || null, new_session: !!fresh }); }
+  const [provider, model] = ($("#prov").value || "mock|mock-agent").split("|");
+  try { await api("POST", `/v1/projects/${project}/chat`, { message, provider, model: provider === "mock" ? null : model, new_session: !!fresh }); }
   catch (e) { alert(e.message); }
   render();
+}
+async function toggleVendor(v, on) { await act(on ? "POST" : "DELETE", on ? `/v1/projects/${project}/providers` : `/v1/projects/${project}/providers/${v}`, on ? { vendor: v } : undefined); }
+async function addClaim() { const s = $("#cs").value.trim(); if (s) await act("POST", `/v1/projects/${project}/claims`, { statement: s }); }
+async function resolveClaim(id, decision) { const note = prompt(`Why is it ${decision}? (kept with the claim)`); if (note !== null) await act("POST", `/v1/projects/${project}/claims/${id}/resolve`, { decision, note }); }
+async function testClaim(id) {
+  const t = lastTasks.find(t => t.tool === "run_tests" && t.status === "succeeded");
+  if (!t) return alert("No finished test run in this project yet.");
+  if (confirm(`Settle this claim with test run ${t.id} (exit ${t.result.exit_code})? A pass verifies it; a failure refutes it.`))
+    await act("POST", `/v1/projects/${project}/claims/${id}/resolve`, { test_task_id: t.id });
 }
 async function resolveTask(id, ok) {
   if (ok) return act("POST", `/v1/tasks/${id}/approve`);

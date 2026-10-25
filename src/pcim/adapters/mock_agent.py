@@ -60,6 +60,9 @@ class MockAgentAdapter:
         if self.script is not None:
             spec = self.script.pop(0)
             return self._step(spec.get("text", ""), spec.get("tool_uses"))
+        if any(t["name"] == "submit_assessment" for t in tools):
+            return self._tool("submit_assessment", {"verdict": "uncertain", "counter_claim": "", "check": "",
+                                                    "rationale": f"{TAG} I cannot assess claims; connect a model."})
         last = messages[-1]["content"]
         if isinstance(last, list) and any(isinstance(b, dict) and b.get("type") == "tool_result" for b in last):
             lines = []

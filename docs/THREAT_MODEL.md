@@ -1,8 +1,14 @@
 # Threat model: Personal CI with workspace execution
 
 **Scope.** One person, one machine, a local server on 127.0.0.1, an encrypted SQLite store
-in `$PCIM_HOME`, model calls to one external provider, and tools that act on folders the
-person authorized.
+in `$PCIM_HOME`, model calls to several providers, and tools that act on folders the person
+authorized. The providers are:
+
+- Anthropic, through the API or through the local `claude` CLI login;
+- OpenAI, wire-tested only;
+- a mock agent.
+
+CI delegates work from one model to another through the exchange gateway.
 
 This document says "controlled" only where code enforces it *and* a test exercises it. It
 names the test.
@@ -25,6 +31,10 @@ names the test.
 4. **Workspace content → model.** Repository files, documents and tool output are
    untrusted input.
 5. **Tests → machine.** `run_tests` executes repository code, so it is code execution.
+6. **Model → model.** A verifier sees only what the gateway resolves for it. Its reply is
+   untrusted input, like any model output.
+7. **CI → `claude` CLI subprocess.** It runs with the person's Claude login. The CLI's own
+   tools, MCP servers, settings and hooks are switched off.
 
 ## Threats and controls
 
@@ -44,13 +54,26 @@ names the test.
 | Someone else on the machine calls the API | Bearer token required; onboarding closes after the first user | partly: any process running as the same OS user can read `$PCIM_HOME/token` |
 | Provider keys reach the browser | Keys are read server-side from the environment only; no endpoint returns them | controlled by construction; **not tested** |
 | Audit tampering | Hash chain; verification on every audit read | evidence, not prevention (`test_audit_chain_detects_tampering`) |
+| Project content reaches a provider the person never chose, or one they revoked | Per-project provider access (by vendor), checked before the briefing is built, again before every model step, before every delegation, and before an MCP briefing; refusals are audited as `egress.blocked` | controlled (`test_milestone1_sixteen_steps` step 16, `test_revocation_stops_a_session_paused_on_an_approval`, `test_mcp_briefing_respects_project_provider_access`) |
+| Provider B receives Provider A's transcript or A-only context | B starts from a compiled briefing, never A's transcript; memory passes the egress guard per vendor; every message logs a disclosure (briefing hash and text, memory sent and withheld) | controlled (`test_milestone1_sixteen_steps` steps 8–9). **Not controlled:** the briefing quotes A's last message (labelled model-written), so anything A repeated from the person goes with it |
+| A verifier is shown evidence it may not see (another project's files, unconsented memory) | Each evidence reference is resolved for the recipient: this project's tasks, notes and claims only; memory through the egress guard; withheld refs are recorded with a reason | controlled (`test_verification_sends_only_what_the_recipient_may_see`) |
+| Consensus mistaken for truth: two models agreeing marks a wrong claim "verified" | Status rules: model agreement gives at most `corroborated`; only a linked `run_tests` result or the person's decision gives `verified`/`refuted`; every assessment is kept | controlled (`test_model_agreement_is_never_verification`, `test_a_failing_linked_test_refutes_and_only_run_tests_tasks_count`) |
+| A model verifies its own claim | Refused when the verifier is the author's provider and model; routing skips the author and prefers another vendor, and labels same-vendor verification as weaker independence | controlled (`test_verification_sends_only_what_the_recipient_may_see`, `test_routing_prefers_another_vendor_and_never_falls_back_to_the_mock`) |
+| Injected text in evidence steers the verifier | Evidence, claim and project are fenced with a per-request nonce and fence-like tags are defanged; the verifier's only output is a typed assessment; it can call no tools | partly: lowers the rate, does not bound it. A misled verifier can still produce a wrong verdict, which is why verdicts never settle a claim |
+| The `claude` CLI subprocess acts on the machine or leaks the prompt | `--tools ""`, `--strict-mcp-config` with no config, `--setting-sources ""` (so no hooks), `--no-session-persistence`, an empty 0700 sandbox cwd, the system prompt in a 0600 file deleted after the call (not in argv, so not in `ps`), IDE-attach variables removed | controlled for what CI passes (`test_claude_cli_adapter_runs_tool_less_and_parses_the_json_protocol`). **Not controlled:** the CLI's own behavior beyond those flags |
+| A late approval restarts a model conversation the person closed | Resolving a task from a closed session settles the task only | controlled (`test_a_late_approval_does_not_resume_a_closed_session`) |
 
 ## Accepted risks in this slice
 
 - There is no container, seccomp or network isolation for `run_tests`. Approving a test
   run means trusting that repository's code as much as running it yourself.
-- There is no live provider test. The Anthropic tool loop is tested against recorded wire
-  format only.
+- Live model calls go through the person's Claude Code login (`claude-cli`). That bills or
+  meters their Claude account, and the content goes to Anthropic under that account's
+  terms. The Anthropic API and OpenAI paths are tested against recorded wire formats only;
+  no key is configured.
+- New projects grant access to the providers chosen at onboarding. That is an explicit,
+  visible, revocable default, but it is a default. A project can be created with
+  `providers: []`.
 - File contents CI reads in a workspace are sent to the chosen provider. Authorizing the
   workspace is the consent for that, and the UI says so.
 - Single-user local deployment. Multi-tenant hosting needs real authentication,

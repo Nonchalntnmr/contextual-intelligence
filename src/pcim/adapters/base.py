@@ -93,6 +93,10 @@ class AgentStep:
     refusal: bool = False
 
 
+class ProviderError(RuntimeError):
+    """The provider could not produce a reply (transport failure, auth, malformed output)."""
+
+
 class Adapter(Protocol):
     provider: str
     model: str

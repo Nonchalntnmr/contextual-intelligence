@@ -10,6 +10,7 @@ adapter only translates it into one provider's request shape (how to say it).
     pricing.py        per-model prices with an as-of date; unknown models cost None, not 0
     mock.py           deterministic, offline
     anthropic.py      official `anthropic` SDK (1.x), prompt caching, refusal fallbacks
+    claude_cli.py     Claude through the local `claude -p` login, tools off, JSON tool protocol
     openai_compat.py  /v1/chat/completions over httpx: OpenAI, vLLM, Ollama, OpenRouter, ...
     gemini.py         Gemini generateContent REST over httpx
 """
@@ -27,6 +28,9 @@ def get_adapter(provider: str, model: str | None = None, **kw):
     if provider == "anthropic":
         from .anthropic import AnthropicAdapter
         return AnthropicAdapter(model or "claude-opus-5-5", **kw)
+    if provider == "claude-cli":
+        from .claude_cli import ClaudeCLIAdapter
+        return ClaudeCLIAdapter(model or "opus", **kw)
     if provider in ("openai", "local"):
         from .openai_compat import OpenAICompatAdapter
         if not model:

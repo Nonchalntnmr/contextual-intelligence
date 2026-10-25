@@ -261,7 +261,9 @@ def test_demo_A_resume_across_processes(tmp_path, repo):
     assert b["open_questions"][0]["text"].startswith("Does the moving-average")
     assert any("drop the rho(J)" in d["text"] and d["source"] == "model" for d in b["decisions"])
     assert len(b["pending_approvals"]) == 1
-    assert any("ran the tests" in line or "run tests" in line for line in b["last_session"]["lines"])
+    # the test run was only proposed: it must not read as done
+    assert "proposed running the tests — awaiting approval" in b["last_session"]["lines"]
+    assert not any(line.startswith("ran the tests") for line in b["last_session"]["lines"])
     turn = agent2.send("u", p.id, "where were we?")
     assert TAG in turn.text and "moving-average baseline" in turn.text and "[model-written]" in turn.text
 

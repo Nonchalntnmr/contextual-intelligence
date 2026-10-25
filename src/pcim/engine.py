@@ -40,6 +40,7 @@ from .policy.candidates import build_candidates
 from .policy.learned import PopulationPrior
 from .policy.prior import designed_prior
 from .profile import intelligence_dna
+from .registry import vendor_of
 from .sovereignty.audit import AuditLog
 from .sovereignty.consent import ConsentLedger
 from .sovereignty.crypto import KeyRing
@@ -113,9 +114,10 @@ class PersonalCI:
         Nothing else is granted. Every connector and document source needs its own store
         and egress grants, given explicitly (consent()).
         """
+        vendors = list(dict.fromkeys(p if p == "*" else vendor_of(p) for p in providers))  # ValueError if unknown
         self.store.create_user(user_id, display_name, settings={"providers": list(providers)})
-        for p in providers:
-            self.ledger.grant(user_id, "user", "egress", p, max_sensitivity, note="onboarding: own statements")
+        for v in vendors:
+            self.ledger.grant(user_id, "user", "egress", v, max_sensitivity, note="onboarding: own statements")
         token = secrets.token_urlsafe(32)
         self.store.set_token_hash(user_id, _hash_token(token))
         self.audit.append(user_id, "user.onboard", providers=list(providers))
@@ -126,7 +128,8 @@ class PersonalCI:
 
     def consent(self, user_id: str, source: str, purpose: str, provider: str = "*",
                 max_sensitivity: Sensitivity = Sensitivity.PERSONAL, note: str = ""):
-        return self.ledger.grant(user_id, source, purpose, provider, max_sensitivity, note=note)
+        vendor = provider if provider == "*" else vendor_of(provider)  # consent is per vendor
+        return self.ledger.grant(user_id, source, purpose, vendor, max_sensitivity, note=note)
 
     def revoke(self, user_id: str, grant_id: str, delete_stored: bool = False) -> dict:
         grants = {g.id: g for g in self.ledger.grants(user_id)}
@@ -205,8 +208,9 @@ class PersonalCI:
         emb = {i: mat[j] for j, i in enumerate(ids)} if mat is not None else {}
         by_id = {i.id: i for i in current}
         task_emb = self.embedder.embed([task])[0]
-        # egress before policy: the policy never learns to rely on what it may not send
-        decision = self.egress.filter(user_id, current, provider, model_label, ref=ref)
+        # egress before policy: the policy never learns to rely on what it may not send.
+        # Consent is per vendor (who receives the data), not per transport.
+        decision = self.egress.filter(user_id, current, vendor_of(provider), model_label, ref=ref)
         cs = build_candidates(decision.allowed, emb, task_emb, effective_confidence, now)
         pol = self.learner.policy_for(user_id)
         sel = pol.select(cs, p_vec, budget, self.rng, propensity_samples=self.propensity_samples)

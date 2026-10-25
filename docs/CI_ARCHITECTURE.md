@@ -39,10 +39,13 @@ egress checks, and audit log.
 2. **Joint reasoning.** The system directive requires the model to state assumptions, the
    strongest objection and the evidence that would change its mind, before agreeing with a
    plan. Notes written by the model are labelled as model-generated, never as fact.
-3. **Orchestration.** One provider is real: Anthropic tool use through the official SDK,
-   tested against recorded wire format only, since no key is configured. Others plug in
-   through the same adapter boundary. Model selection is manual: no routing claim without
-   benchmark evidence.
+3. **Orchestration.** Tool use works through four adapters:
+   - `claude-cli`: live, through the local Claude Code login;
+   - Anthropic SDK and OpenAI Chat Completions: recorded wire formats only, since no key is configured;
+   - the mock.
+
+   The person picks the chat model. Verification is routed deterministically (see
+   "Cross-model layer"). Nothing is routed on claimed quality.
 4. **Adaptation.** Collaboration preferences are explicit, user-visible memory items
    ("explanations: more technical"). They are written when the user gives that feedback and
    rendered into every later session (Demo E). This is an adaptation feature, not evidence
@@ -98,6 +101,105 @@ When a session ends, a factual reflection is computed from task records:
 
 It becomes the start of the next briefing. Any interpretation the model adds is stored
 separately and labelled as such.
+
+## Cross-model layer (milestone 1, 2026-10-24)
+
+```
+                 person ── dashboard / CLI / HTTP ──┐
+                                                    ▼
+   registry.py ── route(role, allowed vendors, author) ──► which model, and why
+        │
+   Workspace.require_provider(project, provider)  ◄── checked before every send, every model
+        │                                              step, every delegation, every MCP briefing
+        ▼
+   agent.py  session with Provider A ─┐                 ┌─ session with Provider B
+   (briefing, not A's transcript)     │  project state  │  (briefing, not A's transcript)
+                                      ▼                 ▼
+                         notes · claims · tasks · disclosures   (sealed with the project key)
+                                      │
+   exchange.py  Gateway.verify_claim ─┴─► AgentMessage ci → verifier (scoped refs only)
+                                         ◄─ AgentMessage verifier → ci (typed assessment)
+                ClaimLedger: unverified → corroborated | contested → verified | refuted
+                                                        (test or person only)
+```
+
+**Provider vs vendor.** A *provider* is how CI reaches a model:
+
+- `anthropic`: API key, official SDK.
+- `claude-cli`: the local Claude Code login.
+- `openai`.
+- `mock`.
+
+A *vendor* is who receives the data. Consent, egress and project access are decided per
+vendor, so revoking Anthropic for a project blocks the API and the CLI alike.
+
+**Project provider access.**
+
+- Each project holds revocable `provider` authorizations, one per vendor.
+- New projects start with the providers chosen at onboarding, recorded as explicit grants.
+- A project created before this existed is backfilled once, and the backfill is audited.
+- Access is checked:
+  - in `Agent.send` before the briefing is built;
+  - in `Agent._run` before every model step, so a revocation also stops a session paused on an approval;
+  - in `Gateway.verify_claim`;
+  - in the MCP `ci_project_briefing`.
+- Each refusal is audited as `egress.blocked`.
+
+**Disclosures.** Every message records:
+
+- the provider, vendor and model it went to;
+- the hash and text of the briefing, if the message included it;
+- the note and claim ids in the briefing;
+- the memory items sent, and the ones withheld, with reasons.
+
+`GET /v1/projects/{id}/disclosures` lists them. This is how step 9 of the brief ("Provider
+B receives only the authorized context") is shown, not just asserted.
+
+**Claims.**
+
+- **Who records them:** a model, through the `record_claim` tool (note risk, runs without approval, provenance from its session), or the person.
+- **Evidence:** ids of this project's tasks, notes and claims, or memory items. Every tool result carries its `task_id`, so a model can cite it.
+- **Statuses:**
+  - `unverified`: no assessment yet.
+  - `corroborated`: another model agreed. This is **not** verification.
+  - `contested`: any assessor disagreed. Every assessment is kept, with its rationale and counter-claim.
+  - `verified` or `refuted`: only a `run_tests` result the person links, or the person's decision. Earlier resolutions stay in `history`.
+
+**Context exchange.** `Gateway.verify_claim` runs these steps in order:
+
+1. Check project access for the verifier's vendor.
+2. Refuse when the verifier is the claim's author.
+3. Resolve each evidence reference for that recipient:
+   - tasks, notes and claims only from this project;
+   - memory only through the egress guard for its vendor;
+   - anything else is withheld, with a reason.
+4. Render a nonce-fenced prompt.
+5. Store the outbound `AgentMessage` with the rendered prompt's SHA-256 before sending.
+6. Accept the reply only through `submit_assessment` (verdict, rationale, counter-claim, the check that would settle it).
+7. Store the inbound message and the assessment.
+
+The `AgentMessage` wire format is the brief's interface exactly (camelCase, strict: unknown
+fields and scopes are rejected).
+
+**Routing** is deterministic and explained. Verification never goes to the author's own
+model, and prefers a model from a different vendor. A different model from the same vendor
+is allowed, labelled "weaker independence." A test double is used only when asked for. Every
+decision returns the candidates considered and why each was or was not eligible. The
+registry reports each model's track record as a verifier (assessments later borne out or
+contradicted by a test or the person). It does not route on it yet.
+
+**The `claude-cli` adapter.**
+
+- Each step is one stateless `claude -p` call, with:
+  - the CLI's tools off, no MCP servers, no settings or hooks, no session persistence;
+  - an empty sandbox as its working directory;
+  - the system prompt passed in a 0600 file, never on the command line.
+- The model answers in a plain JSON protocol, `{"text", "tool_calls"}`.
+- CI validates and governs every requested call. The CLI executes nothing.
+- An earlier version used `--json-schema` structured output. In live runs Haiku 5.5 then
+  tried to call CI's tools natively ("No such tool available") and sometimes gave up. With
+  no tool in the request at all, it follows the protocol on the first turn (see
+  `adapters/claude_cli.py`).
 
 ## What stays out of this slice
 

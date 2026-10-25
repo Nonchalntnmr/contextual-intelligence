@@ -25,7 +25,7 @@ from .workspace import Workspace
 
 RISK = {
     "read_file": "read", "list_files": "read", "search_code": "read", "git_status": "read",
-    "record_note": "note",
+    "record_note": "note", "record_claim": "note",
     "run_tests": "run", "write_file": "write",
 }
 PATH_TOOLS = {"read_file", "write_file"}

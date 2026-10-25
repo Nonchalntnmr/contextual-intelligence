@@ -7,7 +7,8 @@ or for the personal context relevant to a task, record notes and memories, and r
 outcomes. Everything passes through the same engine as the dashboard:
 
 - **Egress.** Context is filtered for the provider named in $PCIM_MCP_PROVIDER (default
-  `anthropic`), because that is who the calling agent sends it to.
+  `anthropic`), because that is who the calling agent sends it to. A project briefing is
+  given only if that project allows the vendor.
 - **Memories from an agent are not your statements.** They are stored with source
   `agent:mcp` and trust `imported`, so they can never become a standing preference without
   your confirmation (`pcim confirm <id>`). This needs a store grant you give once:
@@ -28,7 +29,7 @@ from .adapters.render import _clean, _label
 from .engine import PersonalCI
 from .memory import ConsentRequired
 from .types import KINDS, Trust, new_id, utcnow
-from .workspace import NOTE_KINDS, Workspace, render_briefing
+from .workspace import NOTE_KINDS, ProviderAccessDenied, Workspace, render_briefing
 
 INSTRUCTIONS = (
     "Personal CI holds this person's own context: their projects, goals, preferences, constraints and notes. "
@@ -52,6 +53,10 @@ def build_server(ci: PersonalCI, user_id: str, provider: str = "anthropic") -> M
     @server.tool()
     def ci_project_briefing(project_id: str) -> str:
         """The resume briefing for a project: objective, open questions, decisions, next steps, last session."""
+        try:  # the calling agent forwards this to its provider, so the project must allow that vendor
+            ws.require_provider(user_id, project_id, provider, purpose="mcp")
+        except ProviderAccessDenied as e:
+            return f"error: {e}. The person can allow it in the project's model access settings."
         nonce = secrets.token_hex(6)
         body = render_briefing(ws.briefing(user_id, project_id))
         ci.audit.append(user_id, "mcp.briefing", project=project_id, provider=provider)

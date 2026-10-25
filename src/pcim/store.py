@@ -12,7 +12,8 @@ What is plaintext and what is not:
   provenance, embeddings; task and response text; feedback comments; policy posteriors;
   skill state; the user's display name.
 - Plaintext: ids, kinds, coarse source labels, trust, sensitivity, timestamps, token
-  counts, costs, consent grants, and the audit log, which never contains content.
+  counts, costs, consent grants, claim status and author labels, exchange sender and
+  recipient labels, and the audit log, which never contains content.
 
 secure_delete is on and the WAL is truncated after every deletion, so a deleted row's
 wrapped key does not linger in free pages or the WAL file.
@@ -22,6 +23,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import os
 import sqlite3
 import threading
 from pathlib import Path
@@ -212,6 +214,33 @@ CREATE TABLE IF NOT EXISTS authorizations (
   first_used_at TEXT,
   used_actions INTEGER NOT NULL DEFAULT 0
 );
+
+-- Claim and evidence ledger, and the context exchange between models. Sealed with the
+-- project key like everything else a project says; status, author label and the
+-- sender/recipient labels stay plaintext so the ledger can be listed without decrypting.
+CREATE TABLE IF NOT EXISTS claims (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  project_id TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  status TEXT NOT NULL,
+  author TEXT NOT NULL,
+  payload_ct BLOB NOT NULL
+);
+CREATE INDEX IF NOT EXISTS claims_project ON claims(project_id, created_at);
+CREATE TABLE IF NOT EXISTS exchange_messages (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  project_id TEXT NOT NULL,
+  task_id TEXT NOT NULL,
+  sender TEXT NOT NULL,
+  recipient TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  schema_version TEXT NOT NULL,
+  payload_ct BLOB NOT NULL
+);
+CREATE INDEX IF NOT EXISTS exchange_project ON exchange_messages(project_id, created_at);
 """
 
 
@@ -230,6 +259,10 @@ class Store:
         self._lock = threading.RLock()
         self._db = sqlite3.connect(self.path, check_same_thread=False, isolation_level=None)
         self._db.row_factory = sqlite3.Row
+        if self.path != ":memory:":
+            # Contents are encrypted, but ids, timestamps, grants and the audit log are not:
+            # owner-only. SQLite gives the -wal/-shm files the database file's permissions.
+            os.chmod(self.path, 0o600)
         with self._lock:
             if self.path != ":memory:":
                 self._db.execute("PRAGMA journal_mode=WAL")
@@ -330,7 +363,7 @@ class Store:
             try:
                 key_ids = [r["id"] for r in self._db.execute("SELECT id FROM keys WHERE user_id=?", (user_id,))]
                 for table in ("items", "conflicts", "grants", "interactions", "policy_states", "skills",
-                              "projects", "sessions", "tasks", "authorizations"):
+                              "projects", "sessions", "tasks", "authorizations", "claims", "exchange_messages"):
                     cur = self._db.execute(f"DELETE FROM {table} WHERE user_id=?", (user_id,))
                     counts[table] = cur.rowcount
                 self._db.execute("DELETE FROM users WHERE id=?", (user_id,))
@@ -722,7 +755,7 @@ class Store:
             self._db.execute("BEGIN")
             try:
                 counts = {t: self._db.execute(f"DELETE FROM {t} WHERE project_id=?", (project_id,)).rowcount
-                          for t in ("sessions", "tasks", "authorizations")}
+                          for t in ("sessions", "tasks", "authorizations", "claims", "exchange_messages")}
                 counts["projects"] = self._db.execute("DELETE FROM projects WHERE id=?", (project_id,)).rowcount
                 self._destroy_keys([key_id])
                 self._db.execute("COMMIT")

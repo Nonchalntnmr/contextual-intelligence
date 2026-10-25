@@ -17,13 +17,16 @@ outcomes which context actually helps, and can prove what it sent and what it de
 
 | part | status |
 |---|---|
-| **Workspace slice**: projects, notes with provenance, sessions that resume from a compiled briefing, governed tools (read/list/search/git status/run tests/write/note), durable task queue with approvals, expiry, cancel, undo, halt; three autonomy modes enforced server-side (`workspace.py`, `governor.py`, `tools.py`, `tasks.py`, `agent.py`) | working, tested (66 tests); the full loop was run on a live server with a restart in the middle |
+| **Milestone 1, the brief's sixteen-step demonstration**: one model starts a project, the app restarts, a different model continues without re-explaining, a claim is verified independently, an approved reversible edit runs, revoking a provider blocks it (`docs/MILESTONE1_RESULTS.md`) | **passes offline** (`tests/test_milestone1_demo.py`, Anthropic and OpenAI on recorded wire formats) and **passed 16/16 live** with Claude Opus 5.5 and Haiku 5.5 through the local Claude Code login (all Anthropic: cross-model, not yet cross-vendor) |
+| **Cross-model layer**: per-project provider access checked before every model step; disclosure log of what each provider was sent; claim and evidence ledger where model agreement is never verification; context exchange gateway with the brief's `AgentMessage` format; deterministic, explained routing (`exchange.py`, `registry.py`) | working, tested |
+| **`claude-cli` adapter**: real model calls through `claude -p` with its tools, MCP servers, settings and hooks off; CI's tools through a JSON protocol, every call governed by CI (`adapters/claude_cli.py`) | working **live** |
+| **Workspace slice**: projects, notes with provenance, sessions that resume from a compiled briefing, governed tools (read/list/search/git status/run tests/write/note/claim), durable task queue with approvals, expiry, cancel, undo, halt; three autonomy modes enforced server-side (`workspace.py`, `governor.py`, `tools.py`, `tasks.py`, `agent.py`) | working, tested (81 tests in total); run on a live server with a restart in the middle |
 | MCP server `pcim-mcp`: briefing, consent-filtered context, gated memory, notes, outcomes (`mcp_server.py`) | working against an in-memory MCP client; **not yet registered with a real agent** |
 | Temporal memory: bitemporal, supersession vs correction, conflicts, TTLs, lineage (`memory.py`) | working, tested |
 | Sovereignty: per-record encryption with crypto-shredding, consent per source × provider, lineage-aware egress, hash-chained audit, injection write-gating (`sovereignty/`) | working, tested |
 | Learned context policy: population EM prior, posterior-mean action, density-greedy knapsack (`policy/`) | working; validated in simulation only (G0b) |
 | G0/G0b simulator, runner, pre-registrations, deviation logs, reports (`observatory/`, `experiments/`) | working |
-| Model adapters: Anthropic (official SDK, incl. tool use), OpenAI-compatible, Gemini | tested against recorded wire formats; **no live call made** (no keys configured). Tool use exists for Anthropic only |
+| Model adapters: Anthropic (official SDK), OpenAI-compatible, Gemini | tested against recorded wire formats; **no live call through these** (no keys configured). Tool use: Anthropic, OpenAI, `claude-cli`, mock; not Gemini |
 | Mock model and mock agent | labelled test doubles, not models; they say so in every reply |
 | Assistance-mode bandit, knowledge tracing, intent and VOI | experimental: implemented and unit-tested, not validated on people |
 | FastAPI backend + dashboard (Workspace, Autonomy, Memory, Consent, Receipts, Audit) + `pcim` CLI | working on localhost |
@@ -41,7 +44,7 @@ outcomes which context actually helps, and can prove what it sent and what it de
 
 ```bash
 cd ~/projects/contextual-intelligence
-.venv/bin/python -m pytest -q                       # 66 tests, ~4 s
+.venv/bin/python -m pytest -q                       # 81 tests, ~5 s
 export PCIM_HOME=~/.pcim                             # where your encrypted store lives
 .venv/bin/pcim init --user nishanth --providers mock
 .venv/bin/pcim remember "I prefer concise answers" --kind preference
@@ -50,8 +53,17 @@ export PCIM_HOME=~/.pcim                             # where your encrypted stor
 .venv/bin/pcim-mcp                                   # MCP server over stdio, for terminal agents
 ```
 
-**Real models.** Set `ANTHROPIC_API_KEY`, then use `--providers mock anthropic` at init and
-`--provider anthropic` when asking. The Anthropic adapter defaults to `claude-opus-5-5` at
+**Real models without an API key.** If the `claude` CLI is installed and logged in, use
+`--providers claude-cli` at init. In the dashboard, the models marked available in the
+Models tab can be picked for chat. Each call is billed to, or metered against, that Claude
+account. The milestone demo runs live with:
+
+```bash
+.venv/bin/python scripts/milestone1_live.py --home /tmp/ci-live --out /tmp/ci-live/report
+```
+
+**Real models with keys.** Set `ANTHROPIC_API_KEY`, then use `--providers mock anthropic` at init and
+`--provider anthropic` when asking. For OpenAI, set `OPENAI_API_KEY` and `PCIM_OPENAI_MODEL`. The Anthropic adapter defaults to `claude-opus-5-5` at
 effort `medium`, with prompt caching on the stable system section. It also turns on
 **server-side refusal fallbacks** (`fallbacks: "default"`); pass `fallbacks=False` to
 `AnthropicAdapter` to opt out.
@@ -66,7 +78,13 @@ run twice.
 
 ## Docs
 
-- `docs/EXISTING_SYSTEM_AUDIT.md`, `docs/CI_ARCHITECTURE.md`, `docs/IMPLEMENTATION_PLAN.md`, `docs/THREAT_MODEL.md` cover the workspace slice: what existed, what was built, the governor rules, and every threat with its control, test and residual risk.
+- These docs cover the workspace slice and the cross-model layer: what existed, what was built, the governor and exchange rules, every threat with its control, test and residual risk, and what each test layer proves:
+  - `docs/EXISTING_SYSTEM_AUDIT.md`
+  - `docs/CI_ARCHITECTURE.md`
+  - `docs/IMPLEMENTATION_PLAN.md`
+  - `docs/THREAT_MODEL.md`
+  - `docs/TEST_STRATEGY.md`
+- `docs/MILESTONE1_RESULTS.md` covers the three live runs, including the two that did not pass and what they found.
 
 - `docs/RESEARCH.md` covers feasibility, the PCIM architecture with its math, the G0
   evidence, the G1–G3 programme, falsifiable hypotheses, the roadmap and the evidence bar.

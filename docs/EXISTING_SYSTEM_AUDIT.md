@@ -1,5 +1,47 @@
 # Existing system audit
 
+## Re-audit, 2026-10-24 (before milestone 1: cross-model exchange)
+
+**State:**
+
+- Branch `feat/workspace-autonomy`, one commit ahead of `main` (`71377f7`); not pushed.
+- Two uncommitted changes, preserved:
+  - `store.py` chmods the database to 0600;
+  - `tools.py` refuses `git_status` inside the home-directory repository, and fixes a cancel race. This one was already staged.
+
+**Broken at audit time:**
+
+- **The whole store-backed suite failed:** 11 failed, 31 errors out of 66 tests.
+- **Cause:** the uncommitted `chmod` in `store.py` used `os` without importing it.
+- **Fix:** added the import, the smallest change that completes the edit's intent. The suite then passed: 66/66.
+
+**Real, simulated or missing, against the brief's sixteen-step demonstration:**
+
+| step | state at audit | gap |
+|---|---|---|
+| 1–3 sign in, project, goal | real (bearer token, projects, objective, success criteria) | no constraints field |
+| 4 real request to Provider A | **never done**: no API keys on this machine | the `claude` CLI is installed and logged in, so it can serve as a real provider |
+| 5 context with provenance | real, but notes recorded only "model", not which model | provider and model on every note |
+| 6–7 restart and recover | real, tested | none |
+| 8 resume with Provider B | only Anthropic had tool use | tool use for a second adapter |
+| 9 B gets only authorized context | memory was egress-checked, but **the project briefing went to whatever provider the chat named**, with no check | per-project provider access; a disclosure record per message |
+| 10–11 delegated verification, evidence, disagreement | **missing** | exchange gateway, `AgentMessage`, claim ledger |
+| 12–14 reversible action, approval, execution | real (write with backup and undo, approvals, re-check at execution) | none |
+| 15–16 revoke, prove blocked | consent revocation existed for memory, but nothing stopped project content | as for step 9 |
+
+**Security findings at re-audit:**
+
+1. Project content had no provider-level gate (step 9 above). This was the main finding.
+2. A late approval on a closed session would restart that session's model loop. Found in a live run, fixed.
+3. The session reflection described a proposed, unexecuted write as "changed". Found in a live run when the next model believed it, fixed.
+4. Unchanged from before: `$HOME` is a git repository with sensitive untracked files. Every tool still refuses it.
+
+**Decision:** keep the Python stack again. Nothing in the milestone needs TypeScript,
+Postgres or Redis. The brief's fallback stack applies only "if no functional repository
+exists", and one does.
+
+## Original audit, 2026-10-19
+
 Audited 2026-10-19 at commit `c478a94` on `main`, before the workspace and autonomy work.
 
 ## Repository

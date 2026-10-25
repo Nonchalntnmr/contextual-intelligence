@@ -61,10 +61,11 @@ class Task:
 
 class TaskQueue:
     def __init__(self, ws: Workspace, governor: Governor, executor: Executor | None = None,
-                 approval_ttl_s: int = 3600):
+                 approval_ttl_s: int = 3600, claims=None):
         self.ws, self.gov = ws, governor
         self.executor = executor or Executor()
         self.ttl = approval_ttl_s
+        self.claims = claims  # exchange.ClaimLedger; record_claim fails without one
         self.store, self.audit = ws.store, ws.audit
 
     # ------------------------------------------------------------------ persistence
@@ -201,8 +202,15 @@ class TaskQueue:
         t0 = time.perf_counter()
         try:
             if t.tool == "record_note":
-                note = self.ws.add_note(user_id, t.project_id, t.args["kind"], t.args["text"], source="model")
+                note = self.ws.add_note(user_id, t.project_id, t.args["kind"], t.args["text"], source="model",
+                                        by=self._author(t))
                 result = {"note_id": note["id"]}
+            elif t.tool == "record_claim":
+                if self.claims is None:
+                    raise ToolError("the claim ledger is not enabled here")
+                c = self.claims.add(user_id, t.project_id, t.args["statement"], t.args["evidence"],
+                                    t.args["uncertainty"], author={"kind": "model", **self._author(t)})
+                result = {"claim_id": c["id"], "status": c["status"], "evidence_refs": c["evidence_refs"]}
             else:
                 spec = self.ws.workspace_auth(user_id, t.project_id)["spec"]
                 result = self.executor.run(task_id, t.tool, t.args, spec)
@@ -217,6 +225,13 @@ class TaskQueue:
         self._set(task_id, status=status, reason=reason, finished_at=utcnow().isoformat(), duration_ms=ms,
                   result_ct=self._seal(user_id, t.project_id, result, task_id, "result") if result is not None else None)
         self.audit.append(user_id, "task.finish", task=task_id, tool=t.tool, status=status, ms=round(ms, 1))
+
+    def _author(self, t: Task) -> dict:
+        """Which provider and model proposed this task, from its session."""
+        if not t.session_id:
+            return {}
+        rows = self.store.query("SELECT provider, model FROM sessions WHERE id=?", (t.session_id,))
+        return {"provider": rows[0]["provider"], "model": rows[0]["model"], "session": t.session_id} if rows else {}
 
     def undo(self, user_id: str, task_id: str) -> dict:
         """Restore the file a write_file task replaced (or remove the one it created)."""
