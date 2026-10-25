@@ -61,6 +61,8 @@ def main(argv=None) -> int:
     cs.add_parser("list")
     p = sub.add_parser("memory"); p.add_argument("--history", action="store_true")
     p = sub.add_parser("delete"); p.add_argument("item_id")
+    p = sub.add_parser("confirm", help="confirm an imported or agent-written item; promotes its proposed kind")
+    p.add_argument("item_id"); p.add_argument("--keep-kind", action="store_true")
     p = sub.add_parser("ask"); p.add_argument("task"); p.add_argument("--provider", default="mock")
     p.add_argument("--model"); p.add_argument("--budget", type=int); p.add_argument("--mode")
     p.add_argument("--receipt", action="store_true")
@@ -111,6 +113,9 @@ def main(argv=None) -> int:
         items = ci.memory.all(uid) if a.history else ci.memory.current(uid)
         for i in items:
             print(f"{i.id}  [{i.kind}{' pinned' if i.pinned else ''}] {i.content[:100]}  ({i.source}, {i.trust.value})")
+    elif a.cmd == "confirm":
+        it = ci.memory.confirm(uid, a.item_id, promote=not a.keep_kind)
+        _print({"id": it.id, "kind": it.kind, "trust": it.trust.value})
     elif a.cmd == "delete":
         _print({"deleted": ci.memory.delete(uid, a.item_id)})
     elif a.cmd == "ask":

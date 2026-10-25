@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import time
 
-from .base import ModelResponse, RenderedPrompt, Usage
+from .base import AgentStep, ModelResponse, RenderedPrompt, Usage
 from .pricing import cost_usd
 
 FALLBACK_MODELS = {"claude-fable-5-1", "claude-opus-5-5", "claude-opus-5", "claude-sonnet-5-5"}
@@ -80,6 +80,41 @@ class AnthropicAdapter:
             stop_reason=resp.stop_reason or "", model=served_by, provider=self.provider,
             request_id=getattr(resp, "_request_id", None) or getattr(resp, "id", None), refusal=refusal,
         )
+
+    def agent_step(self, system: str, messages: list[dict], tools: list[dict],
+                   max_tokens: int | None = None) -> AgentStep:
+        """One turn of a tool-using session (manual loop, so every call passes the governor).
+
+        Tools are sent with `strict: true` and `tool_choice` left at auto, as current models
+        require. The assistant content is returned as plain dicts to be appended back
+        unchanged.
+        """
+        kwargs = dict(
+            model=self.model,
+            max_tokens=max_tokens or self.max_tokens,
+            system=[{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
+            messages=messages,
+            tools=[{"name": t["name"], "description": t["description"], "input_schema": t["input_schema"],
+                    "strict": True} for t in tools],
+            output_config={"effort": self.effort},
+        )
+        if self.fallbacks:
+            resp = self.client.beta.messages.create(betas=[FALLBACK_BETA], fallbacks="default", **kwargs)
+        else:
+            resp = self.client.messages.create(**kwargs)
+        u = resp.usage
+        usage = Usage(input_tokens=u.input_tokens or 0, output_tokens=u.output_tokens or 0,
+                      cache_read_tokens=getattr(u, "cache_read_input_tokens", 0) or 0,
+                      cache_write_tokens=getattr(u, "cache_creation_input_tokens", 0) or 0)
+        content = [b.model_dump(mode="json", exclude_none=True) for b in resp.content]
+        refusal = resp.stop_reason == "refusal"
+        text = "" if refusal else "".join(b.text for b in resp.content if b.type == "text")
+        tool_uses = [] if refusal else [{"id": b.id, "name": b.name, "input": b.input}
+                                        for b in resp.content if b.type == "tool_use"]
+        served = resp.model or self.model
+        return AgentStep(content=content, text=text or ("[declined by the model]" if refusal else ""),
+                         tool_uses=tool_uses, stop_reason=resp.stop_reason or "", usage=usage,
+                         cost_usd=cost_usd(served, usage), model=served, refusal=refusal)
 
     def count_tokens(self, prompt: RenderedPrompt) -> int:
         """Exact pre-flight input count from the API (budgeting uses an estimate otherwise)."""

@@ -26,11 +26,14 @@ api = ["fastapi>=0.110", "uvicorn>=0.29"]
 anthropic = ["anthropic>=1,<2"]
 # Experimental neural scorer (src/pcim/policy/neural.py). Not used by any gate.
 neural = ["torch>=2.2"]
+# MCP server (pcim-mcp): the context layer under Claude Code, Codex, Gemini CLI.
+mcp = ["mcp>=2,<3"]
 test = ["pytest>=8", "fastapi>=0.110"]
-all = ["contextual-intelligence[api,anthropic,neural,test]"]
+all = ["contextual-intelligence[api,anthropic,neural,mcp,test]"]
 
 [project.scripts]
 pcim = "pcim.cli:main"
+pcim-mcp = "pcim.mcp_server:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

@@ -40,6 +40,7 @@ from .policy.candidates import build_candidates
 from .policy.learned import PopulationPrior
 from .policy.prior import designed_prior
 from .profile import intelligence_dna
+from .registry import vendor_of
 from .sovereignty.audit import AuditLog
 from .sovereignty.consent import ConsentLedger
 from .sovereignty.crypto import KeyRing
@@ -55,6 +56,19 @@ class AskResult:
     interaction_id: str
     text: str
     receipt: dict
+
+
+@dataclasses.dataclass
+class ContextSelection:
+    probs: dict
+    task_type: str
+    chosen: list
+    sel: object
+    policy: object
+    decision: object
+    n_candidates: int
+    profile: list
+    memories: list
 
 
 def _hash_token(token: str) -> str:
@@ -100,9 +114,10 @@ class PersonalCI:
         Nothing else is granted. Every connector and document source needs its own store
         and egress grants, given explicitly (consent()).
         """
+        vendors = list(dict.fromkeys(p if p == "*" else vendor_of(p) for p in providers))  # ValueError if unknown
         self.store.create_user(user_id, display_name, settings={"providers": list(providers)})
-        for p in providers:
-            self.ledger.grant(user_id, "user", "egress", p, max_sensitivity, note="onboarding: own statements")
+        for v in vendors:
+            self.ledger.grant(user_id, "user", "egress", v, max_sensitivity, note="onboarding: own statements")
         token = secrets.token_urlsafe(32)
         self.store.set_token_hash(user_id, _hash_token(token))
         self.audit.append(user_id, "user.onboard", providers=list(providers))
@@ -113,7 +128,8 @@ class PersonalCI:
 
     def consent(self, user_id: str, source: str, purpose: str, provider: str = "*",
                 max_sensitivity: Sensitivity = Sensitivity.PERSONAL, note: str = ""):
-        return self.ledger.grant(user_id, source, purpose, provider, max_sensitivity, note=note)
+        vendor = provider if provider == "*" else vendor_of(provider)  # consent is per vendor
+        return self.ledger.grant(user_id, source, purpose, vendor, max_sensitivity, note=note)
 
     def revoke(self, user_id: str, grant_id: str, delete_stored: bool = False) -> dict:
         grants = {g.id: g for g in self.ledger.grants(user_id)}
@@ -179,42 +195,27 @@ class PersonalCI:
         self._save_assist(user_id, ap)
         self.audit.append(user_id, "assist.growth_goals", task_types=sorted(task_types))
 
-    def ask(self, user_id: str, task: str, provider: str = "mock", model: str | None = None,
-            budget_tokens: int | None = None, assist_mode: str | None = None) -> AskResult:
+    def select_context(self, user_id: str, task: str, provider: str, model_label: str, budget: int,
+                       ref: str) -> "ContextSelection":
+        """C → B → egress → D: what this provider may see, and what the policy chose from it."""
         if self.store.get_user(user_id) is None:
             raise KeyError(f"unknown user {user_id}")
-        budget = budget_tokens or self.budget_tokens
         now = utcnow()
-        adapter = self._adapter(provider, model)
-        interaction_id = new_id("int")
-
-        # C — task
         probs = classify_task(task)
         p_vec = np.array([probs[t] for t in TASK_TYPES])
-        task_type = max(probs, key=probs.get)
-
-        # B — candidates from current memory
         current = self.memory.current(user_id, now)
         ids, mat = self.memory.embeddings(user_id)
         emb = {i: mat[j] for j, i in enumerate(ids)} if mat is not None else {}
         by_id = {i.id: i for i in current}
         task_emb = self.embedder.embed([task])[0]
-
-        # ⊕ — egress before policy
-        decision = self.egress.filter(user_id, current, provider, adapter.model, ref=interaction_id)
-        allowed = decision.allowed
-        cs = build_candidates(allowed, emb, task_emb, effective_confidence, now)
-
-        # D — selection
+        # egress before policy: the policy never learns to rely on what it may not send.
+        # Consent is per vendor (who receives the data), not per transport.
+        decision = self.egress.filter(user_id, current, vendor_of(provider), model_label, ref=ref)
+        cs = build_candidates(decision.allowed, emb, task_emb, effective_confidence, now)
         pol = self.learner.policy_for(user_id)
         sel = pol.select(cs, p_vec, budget, self.rng, propensity_samples=self.propensity_samples)
         chosen = [by_id[cs.ids[j]] for j in sel.idx]
 
-        # E — assistance mode
-        ap = self._assist(user_id)
-        mode = ap.select(task_type, self.rng, requested=assist_mode)
-
-        # F — packet → prompt → model
         def pitem(i):
             return PacketItem(
                 id=i.id, kind=i.kind, content=i.content, source=i.source, trust=i.trust.value,
@@ -222,8 +223,26 @@ class PersonalCI:
                 conflicted="conflicted" in i.flags,
                 confirmed_instructions=INSTRUCTION_FLAG in i.flags and CONFIRMED_FLAG in i.flags,
             )
-        profile = [pitem(i) for i in chosen if i.pinned and i.trust.rank >= Trust.USER_STATED.rank]
-        memories = [pitem(i) for i in chosen if not (i.pinned and i.trust.rank >= Trust.USER_STATED.rank)]
+        trusted = lambda i: i.pinned and i.trust.rank >= Trust.USER_STATED.rank  # noqa: E731
+        return ContextSelection(
+            probs=probs, task_type=max(probs, key=probs.get), chosen=chosen, sel=sel, policy=pol,
+            decision=decision, n_candidates=len(cs),
+            profile=[pitem(i) for i in chosen if trusted(i)], memories=[pitem(i) for i in chosen if not trusted(i)],
+        )
+
+    def ask(self, user_id: str, task: str, provider: str = "mock", model: str | None = None,
+            budget_tokens: int | None = None, assist_mode: str | None = None) -> AskResult:
+        budget = budget_tokens or self.budget_tokens
+        now = utcnow()
+        adapter = self._adapter(provider, model)
+        interaction_id = new_id("int")
+        cx = self.select_context(user_id, task, provider, adapter.model, budget, ref=interaction_id)
+        probs, task_type, chosen, sel, pol, decision = cx.probs, cx.task_type, cx.chosen, cx.sel, cx.policy, cx.decision
+        profile, memories = cx.profile, cx.memories
+        cs_len = cx.n_candidates
+
+        ap = self._assist(user_id)
+        mode = ap.select(task_type, self.rng, requested=assist_mode)
         packet = ContextPacket(
             packet_id=interaction_id, task=task, directives=[DIRECTIVES[mode]], profile=profile,
             memories=memories, nonce=secrets.token_hex(8),
@@ -240,7 +259,7 @@ class PersonalCI:
                       "where": "profile" if i.pinned and i.trust.rank >= Trust.USER_STATED.rank else "notes"}
                      for i in chosen],
             "withheld_by_egress": [{"id": i, "reason": r} for i, r in decision.blocked],
-            "candidates_considered": len(cs),
+            "candidates_considered": cs_len,
             "context_tokens": int(sum(i.tokens for i in chosen)),
             "budget": budget, "policy": pol.name, "policy_version": pol.version,
             "usage": dataclasses.asdict(resp.usage), "cost_usd": resp.cost_usd, "latency_ms": round(resp.latency_ms, 1),

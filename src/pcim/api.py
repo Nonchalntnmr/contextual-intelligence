@@ -14,12 +14,15 @@ import dataclasses
 import os
 from importlib import resources
 from pathlib import Path
+from typing import Literal
 
+import httpx
 from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from .adapters.base import ProviderError
 from .engine import PersonalCI
 from .memory import ConsentRequired
 from .types import KINDS, Sensitivity
@@ -86,6 +89,71 @@ class ProbeIn(BaseModel):
     skill: str = Field(min_length=1, max_length=200)
     correct: bool
     assisted: bool = False
+
+
+class ProjectIn(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+    objective: str = Field(default="", max_length=4000)
+    success_criteria: str = Field(default="", max_length=4000)
+    constraints: list[str] = Field(default_factory=list, max_length=30)
+    providers: list[str] | None = None  # vendors allowed to receive project content; None = onboarding choice
+
+class ProjectPatch(BaseModel):
+    name: str | None = None
+    objective: str | None = None
+    success_criteria: str | None = None
+    constraints: list[str] | None = None
+
+class ProviderIn(BaseModel):
+    vendor: str
+
+class ClaimIn(BaseModel):
+    statement: str = Field(min_length=1, max_length=2000)
+    evidence_refs: list[str] = Field(default_factory=list, max_length=50)
+    uncertainty: str = Field(default="", max_length=1000)
+
+class VerifyIn(BaseModel):
+    provider: str | None = None  # None: route deterministically
+    model: str | None = None
+    include_test_doubles: bool = False
+
+class ResolveIn(BaseModel):
+    decision: Literal["verified", "refuted"] | None = None
+    note: str = Field(default="", max_length=1000)
+    test_task_id: str | None = None  # settle by a run_tests task instead of by decision
+
+class NoteIn(BaseModel):
+    kind: str
+    text: str = Field(min_length=1, max_length=2000)
+
+class WorkspaceIn(BaseModel):
+    root: str
+    run_argv: list[str] | None = None
+    allow_write: bool = False
+    run_timeout_s: int = Field(default=300, ge=1, le=3600)
+
+class ChatIn(BaseModel):
+    message: str = Field(min_length=1, max_length=50_000)
+    provider: str = "mock"
+    model: str | None = None
+    new_session: bool = False
+
+class ReasonIn(BaseModel):
+    reason: str = ""
+
+class ModeIn(BaseModel):
+    mode: str
+
+class GrantIn(BaseModel):
+    project_id: str
+    tools: list[str]
+    max_actions: int = 10
+    max_seconds: int = 900
+    ttl_minutes: int = 60
+
+class PrefIn(BaseModel):
+    topic: str = Field(min_length=1, max_length=60)
+    value: str = Field(min_length=1, max_length=300)
 
 
 def _item_out(i) -> dict:
@@ -239,7 +307,13 @@ def create_app(ci: PersonalCI) -> FastAPI:
 
     @app.get("/v1/export")
     def export(uid: str = Depends(user)):
-        return ci.export(uid)
+        out = ci.export(uid)
+        out["projects"] = [{"project": project_out(p), "providers": ws.provider_vendors(uid, p.id),
+                            "claims": ledger.list(uid, p.id),
+                            "tasks": [t.public() for t in queue.list(uid, p.id, limit=100_000)],
+                            "disclosures": agent.disclosures(uid, p.id), "exchange": gateway.messages(uid, p.id)}
+                           for p in ws.list_projects(uid)]
+        return out
 
     @app.post("/v1/growth/goals")
     def goals(body: GoalsIn, uid: str = Depends(user)):
@@ -252,6 +326,210 @@ def create_app(ci: PersonalCI) -> FastAPI:
     @app.post("/v1/growth/probe")
     def probe(body: ProbeIn, uid: str = Depends(user)):
         return ci.probe(uid, body.skill, body.correct, body.assisted)
+
+    # ------------------------------------------------------------------ workspace slice
+    from . import registry
+    from .agent import Agent
+    from .exchange import ClaimLedger, Gateway
+    from .governor import Governor
+    from .tasks import TaskQueue, TaskStateError
+    from .workspace import Workspace, WorkspaceError
+
+    ws = Workspace(ci)
+    ledger = ClaimLedger(ws)
+    queue = TaskQueue(ws, Governor(ws), claims=ledger)
+    agent = Agent(ci, ws, queue, ledger)
+    gateway = Gateway(ci, ws, queue, ledger, agent.adapter)
+    queue.recover()  # nothing that was running when the server stopped is re-run
+    app.state.workspace, app.state.queue, app.state.agent, app.state.gateway = ws, queue, agent, gateway
+
+    def guard(fn, *a, **k):
+        try:
+            return fn(*a, **k)
+        except KeyError:
+            raise HTTPException(404, "not found")
+        except PermissionError as e:  # provider access revoked or never granted
+            raise HTTPException(403, str(e))
+        except (WorkspaceError, ValueError) as e:
+            raise HTTPException(422, str(e))
+        except (ProviderError, httpx.HTTPError) as e:
+            raise HTTPException(502, f"model provider error: {e}")
+        except (TaskStateError, RuntimeError) as e:
+            raise HTTPException(409, str(e))
+
+    def turn_out(t):
+        return t.as_dict() if hasattr(t, "as_dict") else t
+
+    def project_out(p):
+        return dataclasses.asdict(p)
+
+    @app.get("/v1/projects")
+    def projects(uid: str = Depends(user)):
+        return [project_out(p) for p in ws.list_projects(uid)]
+
+    @app.post("/v1/projects")
+    def create_project(body: ProjectIn, uid: str = Depends(user)):
+        return project_out(guard(ws.create_project, uid, body.name, body.objective, body.success_criteria,
+                                 body.constraints, body.providers))
+
+    @app.get("/v1/projects/{pid}")
+    def project(pid: str, uid: str = Depends(user)):
+        return {"project": project_out(guard(ws.get_project, uid, pid)), "briefing": guard(agent.briefing, uid, pid),
+                "providers": guard(ws.provider_vendors, uid, pid)}
+
+    @app.get("/v1/projects/{pid}/providers")
+    def providers(pid: str, uid: str = Depends(user)):
+        return {"vendors": guard(ws.provider_vendors, uid, pid), "known": list(registry.VENDORS)}
+
+    @app.post("/v1/projects/{pid}/providers")
+    def grant_provider(pid: str, body: ProviderIn, uid: str = Depends(user)):
+        guard(ws.grant_provider, uid, pid, body.vendor, "granted by you")
+        return {"vendors": ws.provider_vendors(uid, pid)}
+
+    @app.delete("/v1/projects/{pid}/providers/{vendor}")
+    def revoke_provider(pid: str, vendor: str, uid: str = Depends(user)):
+        n = guard(ws.revoke_provider, uid, pid, vendor)
+        return {"revoked": n, "vendors": ws.provider_vendors(uid, pid)}
+
+    @app.get("/v1/projects/{pid}/disclosures")
+    def disclosures(pid: str, uid: str = Depends(user)):
+        return guard(agent.disclosures, uid, pid)
+
+    @app.get("/v1/projects/{pid}/claims")
+    def claims(pid: str, uid: str = Depends(user)):
+        return guard(ledger.list, uid, pid)
+
+    @app.post("/v1/projects/{pid}/claims")
+    def add_claim(pid: str, body: ClaimIn, uid: str = Depends(user)):
+        return guard(ledger.add, uid, pid, body.statement, body.evidence_refs, body.uncertainty, {"kind": "person"})
+
+    @app.get("/v1/projects/{pid}/route")
+    def route(pid: str, role: str = "verify", claim_id: str | None = None, include_test_doubles: bool = False,
+              uid: str = Depends(user)):
+        author = guard(ledger.get, uid, pid, claim_id)["author"] if claim_id else None
+        return guard(registry.route, role, set(guard(ws.provider_vendors, uid, pid)), author,
+                     include_test_doubles).as_dict()
+
+    @app.post("/v1/projects/{pid}/claims/{cid}/verify")
+    def verify(pid: str, cid: str, body: VerifyIn, uid: str = Depends(user)):
+        chosen = None
+        provider, model = body.provider, body.model
+        if provider is None:
+            r = registry.route("verify", set(guard(ws.provider_vendors, uid, pid)), guard(ledger.get, uid, pid, cid)["author"],
+                               body.include_test_doubles)
+            if r.entry is None:
+                raise HTTPException(409, r.reason)
+            provider, model, chosen = r.entry.provider, r.entry.model, r.as_dict()
+        out = guard(gateway.verify_claim, uid, pid, cid, provider, model)
+        return out | {"route": chosen}
+
+    @app.post("/v1/projects/{pid}/claims/{cid}/resolve")
+    def resolve_claim(pid: str, cid: str, body: ResolveIn, uid: str = Depends(user)):
+        if body.test_task_id:
+            return guard(gateway.resolve_with_test, uid, pid, cid, body.test_task_id, body.note)
+        if body.decision is None:
+            raise HTTPException(422, "give a decision or a test_task_id")
+        return guard(ledger.resolve, uid, pid, cid, body.decision, "person", body.note)
+
+    @app.get("/v1/projects/{pid}/exchange")
+    def exchange(pid: str, uid: str = Depends(user)):
+        return guard(gateway.messages, uid, pid)
+
+    @app.get("/v1/models")
+    def models(uid: str = Depends(user)):
+        return registry.describe(ledger.track_record(uid))
+
+    @app.patch("/v1/projects/{pid}")
+    def patch_project(pid: str, body: ProjectPatch, uid: str = Depends(user)):
+        return project_out(guard(ws.update_project, uid, pid, **body.model_dump()))
+
+    @app.delete("/v1/projects/{pid}")
+    def delete_project(pid: str, uid: str = Depends(user)):
+        return guard(ws.delete_project, uid, pid)
+
+    @app.post("/v1/projects/{pid}/notes")
+    def add_note(pid: str, body: NoteIn, uid: str = Depends(user)):
+        return guard(ws.add_note, uid, pid, body.kind, body.text, "user")
+
+    @app.post("/v1/projects/{pid}/notes/{nid}/resolve")
+    def resolve_note(pid: str, nid: str, uid: str = Depends(user)):
+        guard(ws.resolve_note, uid, pid, nid)
+        return {"ok": True}
+
+    @app.post("/v1/projects/{pid}/workspace")
+    def authorize(pid: str, body: WorkspaceIn, uid: str = Depends(user)):
+        aid = guard(ws.authorize_workspace, uid, pid, body.root, body.run_argv, body.allow_write, body.run_timeout_s)
+        return {"authorization_id": aid}
+
+    @app.post("/v1/projects/{pid}/chat")
+    def chat(pid: str, body: ChatIn, uid: str = Depends(user)):
+        guard(ws.get_project, uid, pid)
+        return turn_out(guard(agent.send, uid, pid, body.message, body.provider, body.model, body.new_session))
+
+    @app.get("/v1/projects/{pid}/session")
+    def session(pid: str, uid: str = Depends(user)):
+        guard(ws.get_project, uid, pid)
+        return guard(agent.transcript, uid, pid)
+
+    @app.post("/v1/projects/{pid}/session/close")
+    def close_session(pid: str, uid: str = Depends(user)):
+        guard(ws.get_project, uid, pid)
+        return {"reflection": guard(agent.close_session, uid, pid)}
+
+    @app.get("/v1/tasks")
+    def tasks(uid: str = Depends(user), project_id: str | None = None, status: str | None = None):
+        return [t.public() for t in queue.list(uid, project_id, status)]
+
+    @app.get("/v1/tasks/{tid}")
+    def task(tid: str, uid: str = Depends(user)):
+        return guard(queue.get, uid, tid).public()
+
+    @app.post("/v1/tasks/{tid}/approve")
+    def approve(tid: str, uid: str = Depends(user)):
+        return turn_out(guard(agent.resolve, uid, tid, True))
+
+    @app.post("/v1/tasks/{tid}/deny")
+    def deny(tid: str, body: ReasonIn, uid: str = Depends(user)):
+        return turn_out(guard(agent.resolve, uid, tid, False, body.reason))
+
+    @app.post("/v1/tasks/{tid}/cancel")
+    def cancel(tid: str, uid: str = Depends(user)):
+        return turn_out(guard(agent.cancel, uid, tid))
+
+    @app.post("/v1/tasks/{tid}/undo")
+    def undo(tid: str, uid: str = Depends(user)):
+        return guard(queue.undo, uid, tid)
+
+    @app.get("/v1/autonomy")
+    def autonomy(uid: str = Depends(user)):
+        return {"mode": ws.get_mode(uid), "halted": ws.is_halted(uid), "grants": ws.all_auths(uid)}
+
+    @app.put("/v1/autonomy")
+    def set_mode(body: ModeIn, uid: str = Depends(user)):
+        guard(ws.set_mode, uid, body.mode)
+        return {"mode": body.mode}
+
+    @app.post("/v1/autonomy/grants")
+    def grant_autonomy(body: GrantIn, uid: str = Depends(user)):
+        return {"authorization_id": guard(ws.grant_autonomy, uid, body.project_id, body.tools, body.max_actions,
+                                          body.max_seconds, body.ttl_minutes)}
+
+    @app.delete("/v1/autonomy/grants/{aid}")
+    def revoke_grant(aid: str, uid: str = Depends(user)):
+        return {"revoked": ws.revoke(uid, aid)}
+
+    @app.post("/v1/autonomy/halt")
+    def halt(uid: str = Depends(user)):
+        return queue.halt(uid)
+
+    @app.post("/v1/autonomy/resume")
+    def resume(uid: str = Depends(user)):
+        ws.set_halted(uid, False)
+        return {"halted": False}
+
+    @app.post("/v1/preferences")
+    def preference(body: PrefIn, uid: str = Depends(user)):
+        return guard(agent.set_collaboration_preference, uid, body.topic, body.value)
 
     dash = Path(str(resources.files("pcim") / "dashboard"))
     if dash.exists():
