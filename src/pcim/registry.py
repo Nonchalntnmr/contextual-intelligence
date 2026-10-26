@@ -26,6 +26,7 @@ VENDOR = {"anthropic": "anthropic", "claude-cli": "anthropic", "openai": "openai
           "local": "local", "mock": "mock"}
 VENDORS = ("anthropic", "openai", "google", "local", "mock")
 ROLES = ("chat", "verify")
+CLI_ALIASES = {"opus": "claude-opus-5-5", "sonnet": "claude-sonnet-5-5", "haiku": "claude-haiku-5-5"}
 
 
 def vendor_of(provider: str) -> str:
@@ -33,6 +34,17 @@ def vendor_of(provider: str) -> str:
         return VENDOR[provider]
     except KeyError:
         raise ValueError(f"unknown provider {provider!r}") from None
+
+
+def model_identity(provider: str | None, model: str | None) -> tuple[str, str] | None:
+    """(vendor, canonical model): the same model reached two ways is one identity, so
+    `claude-cli:opus` and `anthropic:claude-opus-5-5` cannot verify each other's claims."""
+    if not provider or provider not in VENDOR:
+        return None
+    m = model or ""
+    if provider == "claude-cli":
+        m = CLI_ALIASES.get(m, m)
+    return VENDOR[provider], m
 
 
 @dataclasses.dataclass(frozen=True)
@@ -143,8 +155,8 @@ def route(role: str, allowed_vendors: set[str], author: dict | None = None,
     if role not in ROLES:
         raise ValueError(f"role must be one of {ROLES}")
     author = author or {}
-    a_vendor = VENDOR.get(author.get("provider", ""), None)
-    a_key = f"{author.get('provider')}:{author.get('model')}" if author.get("provider") else None
+    a_id = model_identity(author.get("provider"), author.get("model"))
+    a_vendor = a_id[0] if a_id else None
     tiers: dict[int, list[ModelEntry]] = {0: [], 1: []}
     considered = []
     for e in entries():
@@ -160,8 +172,8 @@ def route(role: str, allowed_vendors: set[str], author: dict | None = None,
         if e.vendor not in allowed_vendors:
             considered.append((e.key, f"no access: {e.vendor} is not authorized for this project"))
             continue
-        if role == "verify" and e.key == a_key:
-            considered.append((e.key, "skipped: it made the claim"))
+        if role == "verify" and a_id and model_identity(e.provider, e.model) == a_id:
+            considered.append((e.key, "skipped: the same model made the claim"))
             continue
         tier = 1 if role == "verify" and a_vendor and e.vendor == a_vendor else 0
         tiers[tier].append(e)

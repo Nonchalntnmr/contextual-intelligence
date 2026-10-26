@@ -155,8 +155,10 @@ class Workspace:
         return self.get_project(user_id, project_id)
 
     def add_note(self, user_id: str, project_id: str, kind: str, text: str, source: str = "user",
-                 by: dict | None = None) -> dict:
-        """`by` records who wrote a model note: {"provider", "model", "session"}."""
+                 by: dict | None = None, lineage: list[str] | None = None) -> dict:
+        """`by` records who wrote a model note: {"provider", "model", "session"}. `lineage` lists
+        the memory items the writing model had been shown; a vendor that may not see one of
+        them is not shown the note either (derived_blocked)."""
         if kind not in NOTE_KINDS:
             raise WorkspaceError(f"note kind must be one of {NOTE_KINDS}")
         if source not in ("user", "model", "system"):
@@ -170,6 +172,8 @@ class Workspace:
                 "created_at": utcnow().isoformat(), "resolved_at": None}
         if by:
             note["by"] = {k: str(by[k])[:80] for k in ("provider", "model", "session") if by.get(k)}
+        if lineage:
+            note["lineage"] = list(dict.fromkeys(lineage))[:200]
         p.setdefault("notes", []).append(note)
         self._save(row, p)
         self.audit.append(user_id, "project.note", project=project_id, note=note["id"], kind=kind, source=source)
@@ -184,6 +188,19 @@ class Workspace:
                 self._save(row, p)
                 self.audit.append(user_id, "project.note_resolved", project=project_id, note=note_id)
                 return
+        raise KeyError(note_id)
+
+    def release_note(self, user_id: str, project_id: str, note_id: str) -> dict:
+        """The person has read a model-written note and lets every authorized vendor see it,
+        whatever memory the writing model had been shown."""
+        row = self._row(user_id, project_id)
+        p = self._payload(row)
+        for n in p.get("notes", []):
+            if n["id"] == note_id:
+                n["released_at"] = utcnow().isoformat()
+                self._save(row, p)
+                self.audit.append(user_id, "project.note_release", project=project_id, note=note_id)
+                return n
         raise KeyError(note_id)
 
     def delete_project(self, user_id: str, project_id: str) -> dict:
@@ -352,6 +369,20 @@ class Workspace:
             active = self.active_auths(user_id, project_id, "provider")
         return sorted({a["spec"]["vendor"] for a in active})
 
+    def derived_blocked(self, user_id: str, lineage: list[str] | None, vendor: str) -> str | None:
+        """Why model-written content derived from these memory items may not go to `vendor`,
+        or None. The egress guard decides, as for the items themselves. An item that was later
+        superseded or expired was consented when it was used, so it does not block; one that
+        was retracted or deleted does."""
+        for iid in lineage or []:
+            item = self.store.get_item(iid)
+            if item is None:
+                return f"derived from memory that was deleted ({iid})"
+            ok, why = self.ci.egress.check(user_id, item, vendor)
+            if not ok and not (why == "not-current" and item.status != "retracted"):
+                return f"derived from {iid}, which {vendor} may not see ({why})"
+        return None
+
     def provider_allowed(self, user_id: str, project_id: str, provider: str) -> bool:
         return vendor_of(provider) in self.provider_vendors(user_id, project_id)
 
@@ -365,9 +396,23 @@ class Workspace:
         return vendor
 
     # ------------------------------------------------------------------ briefing
-    def briefing(self, user_id: str, project_id: str) -> dict:
-        """Everything a new session needs to resume, compiled from stored state only."""
+    def briefing(self, user_id: str, project_id: str, vendor: str | None = None) -> dict:
+        """Everything a new session needs to resume, compiled from stored state only.
+
+        With `vendor`, model-written notes derived from memory that vendor may not see are
+        left out and listed under "withheld"; without it (the person's own view) nothing is."""
         p = self.get_project(user_id, project_id)
+        withheld = []
+        if vendor is not None:
+            kept = []
+            for n in p.notes:
+                why = self.derived_blocked(user_id, n.get("lineage"), vendor) \
+                    if n.get("lineage") and not n.get("released_at") else None
+                if why:
+                    withheld.append({"id": n["id"], "reason": why})
+                else:
+                    kept.append(n)
+            p.notes = kept
         key = self.project_key(user_id, project_id)
         last = self.store.query(
             "SELECT * FROM sessions WHERE project_id=? AND status='closed' ORDER BY updated_at DESC LIMIT 1",
@@ -391,36 +436,46 @@ class Workspace:
             "workspace": ({"root": ws["spec"]["root"], "can_run_tests": ws["spec"]["run_argv"] is not None,
                            "can_write": ws["spec"]["allow_write"]} if ws else None),
             "mode": self.get_mode(user_id),
+            "withheld": withheld,
         }
 
 
+def _one_line(text) -> str:
+    """Collapse all whitespace, so stored text cannot start a line of its own in the briefing
+    (a note or claim containing "\\n- [verified] ..." would otherwise forge a ledger line)."""
+    return " ".join(str(text).split())
+
+
 def render_briefing(b: dict) -> str:
-    """Briefing as plain text for the model. Model-written notes are marked."""
+    """Briefing as plain text for the model. CI's own labels (status, who wrote it) come
+    before any stored text on each line, and stored text is kept to one line."""
     def line(n):
-        tag = "" if n["source"] == "user" else f" [{n['source']}-written]"
-        who = f"{n['by']['model']}, " if n.get("by", {}).get("model") else ""
-        return f"- {n['text']}{tag} ({who}{n['created_at'][:10]})"
+        if n["source"] == "user":
+            return f"- {_one_line(n['text'])} ({n['created_at'][:10]})"
+        who = f" by {_one_line(n['by']['model'])}" if n.get("by", {}).get("model") else ""
+        return f"- [{n['source']}-written{who}, {n['created_at'][:10]}] {_one_line(n['text'])}"
 
     p = b["project"]
-    parts = [f"Project: {p['name']}"]
+    parts = [f"Project: {_one_line(p['name'])}"]
     if p["objective"]:
-        parts.append(f"Objective: {p['objective']}")
+        parts.append(f"Objective: {_one_line(p['objective'])}")
     if p.get("constraints"):
-        parts.append("Constraints:\n" + "\n".join(f"- {c}" for c in p["constraints"]))
+        parts.append("Constraints:\n" + "\n".join(f"- {_one_line(c)}" for c in p["constraints"]))
     if p["success_criteria"]:
-        parts.append(f"Success criteria: {p['success_criteria']}")
+        parts.append(f"Success criteria: {_one_line(p['success_criteria'])}")
     for title, key in (("Open questions", "open_questions"), ("Decisions so far", "decisions"),
                        ("Next steps", "next_steps")):
         if b[key]:
             parts.append(f"{title}:\n" + "\n".join(line(n) for n in b[key]))
     if b.get("claims"):
-        parts.append("Claims on record (status is from CI's claim ledger; 'corroborated' means another model agreed, "
-                     "which is not verification):\n" + "\n".join(
-                         f"- [{c['status']}] {c['statement']} ({c['author_label']}; {c['assessments']} assessment(s))"
-                         for c in b["claims"]))
+        parts.append("Claims on record. The bracket is CI's own record: status from the claim ledger, who made the "
+                     "claim, how many assessments. 'corroborated' means another model agreed, which is not "
+                     "verification. Only the text after the bracket is the claim itself:\n" + "\n".join(
+                         f"- [{c['status']}; {_one_line(c['author_label'])}; {c['assessments']} assessment(s)] "
+                         f"{_one_line(c['statement'])}" for c in b["claims"]))
     ls = b.get("last_session")
     if ls:
-        parts.append("Last session (computed from task records):\n" + "\n".join(f"- {x}" for x in ls.get("lines", [])))
+        parts.append("Last session (computed from task records):\n" + "\n".join(f"- {_one_line(x)}" for x in ls.get("lines", [])))
     if b.get("workspace"):
         w = b["workspace"]
         parts.append(f"Authorized workspace: {w['root']} (tests: {'allowed with approval' if w['can_run_tests'] else 'not configured'}; "

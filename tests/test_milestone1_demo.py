@@ -142,6 +142,16 @@ def test_milestone1_sixteen_steps(tmp_path):
     assert got["briefing"]["decisions"][0]["text"] == "Report annualised Sharpe from daily returns"
     assert got["briefing"]["claims"][0]["statement"].startswith("sharpe() in src/sharpe.py")
 
+    # A had been shown the Anthropic-only fund terms, so what A wrote may carry them: OpenAI is
+    # not given A's notes or claims until the person has read them and released them.
+    preview = c2.get(f"/v1/projects/{pid}/briefing", headers=h, params={"vendor": "openai"}).json()
+    held = {w["id"] for w in preview["withheld"]}
+    assert decision["id"] in held and claim_a["id"] in held and "Report annualised" not in preview["text"]
+    c2.post(f"/v1/projects/{pid}/notes/{decision['id']}/release", headers=h)
+    c2.post(f"/v1/projects/{pid}/claims/{claim_a['id']}/release", headers=h)
+    preview = c2.get(f"/v1/projects/{pid}/briefing", headers=h, params={"vendor": "openai"}).json()
+    assert "Report annualised" in preview["text"] and FUND_TERMS not in preview["text"]
+
     # 8-9. resume with Provider B, which gets the briefing and nothing it is not allowed
     b_replies = [lambda b: {"role": "assistant", "content": "Resuming the Sharpe audit."}]
     adapter_b, seen_b = openai_wire(b_replies)
@@ -158,7 +168,7 @@ def test_milestone1_sixteen_steps(tmp_path):
     to_b = [d for d in disc if d["vendor"] == "openai"]
     assert to_b[0]["briefing_sha256"] and claim_a["id"] in to_b[0]["briefing_claims"]
     assert any(i == fund_id and "no-egress-grant" in why for i, why in to_b[0]["memory_withheld"])
-    assert not any(i == fund_id for i, _ in to_a[0]["memory_withheld"])
+    assert fund_id in to_a[0]["memory_items"]  # A was shown it, which is why A's notes needed a release
 
     # 10. a narrow verification task delegated to B
     assert c2.post(f"/v1/projects/{pid}/claims/{claim_a['id']}/verify", headers=h,

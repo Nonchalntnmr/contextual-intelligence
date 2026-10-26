@@ -34,8 +34,9 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from pydantic.alias_generators import to_camel
 
 from .adapters.render import _clean
-from .registry import vendor_of
+from .registry import model_identity, vendor_of
 from .types import new_id, utcnow
+from .workspace import ProviderAccessDenied
 
 SCHEMA_VERSION = "ci.agent-message/1"
 SCOPES = ("claim:read", "evidence:read", "project:objective:read", "project:constraints:read")
@@ -136,7 +137,8 @@ class ClaimLedger:
         return dict(c, author_label=author_label(c["author"]))
 
     def add(self, user_id: str, project_id: str, statement: str, evidence_refs=(), uncertainty: str = "",
-            author: dict | None = None) -> dict:
+            author: dict | None = None, lineage: list[str] | None = None) -> dict:
+        """`lineage`: memory items the authoring model had been shown (see Workspace.derived_blocked)."""
         statement = (statement or "").strip()[:2000]
         if not statement:
             raise ValueError("a claim needs a statement")
@@ -145,7 +147,7 @@ class ClaimLedger:
         c = {"id": new_id("clm"), "project_id": project_id, "statement": statement,
              "uncertainty": (uncertainty or "").strip()[:1000], "evidence_refs": parse_refs(evidence_refs),
              "author": author or {"kind": "person"}, "created_at": now, "assessments": [], "resolution": None,
-             "history": []}
+             "history": [], "lineage": list(dict.fromkeys(lineage or []))[:200]}
         out = self._write(user_id, project_id, c, insert=True)
         self.audit.append(user_id, "claim.add", project=project_id, claim=c["id"], author=author_label(c["author"]),
                           refs=len(c["evidence_refs"]))
@@ -180,9 +182,24 @@ class ClaimLedger:
         self.audit.append(user_id, "claim.resolve", project=project_id, claim=claim_id, decision=decision, by=by)
         return out
 
+    def release(self, user_id: str, project_id: str, claim_id: str) -> dict:
+        """The person has read the claim and lets every authorized vendor see it, whatever
+        memory its author had been shown."""
+        c = self._load(user_id, project_id, claim_id)
+        c["released_at"] = utcnow().isoformat()
+        out = self._write(user_id, project_id, c)
+        self.audit.append(user_id, "claim.release", project=project_id, claim=claim_id)
+        return out
+
+    @staticmethod
+    def restricting_lineage(c: dict) -> list[str]:
+        """The lineage that still limits who may see this claim (none once released)."""
+        return [] if c.get("released_at") else c.get("lineage", [])
+
     def summary(self, user_id: str, project_id: str, limit: int = 15) -> list[dict]:
         return [{"id": c["id"], "status": c["status"], "statement": c["statement"], "author_label": c["author_label"],
-                 "assessments": len(c["assessments"])} for c in self.list(user_id, project_id)[-limit:]]
+                 "assessments": len(c["assessments"]), "lineage": self.restricting_lineage(c)}
+                for c in self.list(user_id, project_id)[-limit:]]
 
     def track_record(self, user_id: str) -> dict[str, dict]:
         """Per verifier model: how many assessments, how many on claims later settled, and
@@ -256,12 +273,20 @@ class Gateway:
                 return None, "belongs to another project"
             if t.status != "succeeded":
                 return None, f"task {t.status}"
+            if t.requested_by == "model" and t.tool in ("write_file", "record_note", "record_claim"):
+                why = self.ws.derived_blocked(user_id, self.queue.exposure(user_id, t), vendor)
+                if why:  # model-written content may carry memory the recipient may not see
+                    return None, why
             res = {k: v for k, v in (t.result or {}).items() if k != "backup"}
             return f"{t.tool} {json.dumps(t.args)} -> {json.dumps(res, default=str)}"[:6000], None
         if ref.startswith("note_"):
             n = next((n for n in project.notes if n["id"] == ref), None)
             if n is None:
                 return None, "not a note of this project"
+            why = self.ws.derived_blocked(user_id, n.get("lineage"), vendor) \
+                if n.get("lineage") and not n.get("released_at") else None
+            if why:
+                return None, why
             who = "the person" if n["source"] == "user" else f"{n['source']}-written" + (
                 f" by {n['by']['model']}" if n.get("by", {}).get("model") else "")
             return f"{n['kind'].replace('_', ' ')} ({who}): {n['text']}", None
@@ -270,6 +295,10 @@ class Gateway:
                 other = self.ledger._load(user_id, project.id, ref)
             except KeyError:
                 return None, "not a claim of this project"
+            lineage = self.ledger.restricting_lineage(other)
+            why = self.ws.derived_blocked(user_id, lineage, vendor) if lineage else None
+            if why:
+                return None, why
             return f"claim [{other['status']}]: {other['statement']}", None
         if ref.startswith("mem_"):
             item = self.store.get_item(ref)
@@ -284,10 +313,17 @@ class Gateway:
     def verify_claim(self, user_id: str, project_id: str, claim_id: str, provider: str, model: str | None = None) -> dict:
         claim = self.ledger._load(user_id, project_id, claim_id)
         vendor = self.ws.require_provider(user_id, project_id, provider, purpose="verify")
+        if self.ledger.restricting_lineage(claim):
+            why = self.ws.derived_blocked(user_id, self.ledger.restricting_lineage(claim), vendor)
+            if why:
+                self.audit.append(user_id, "egress.blocked", project=project_id, provider=provider, vendor=vendor,
+                                  purpose="verify-derived", claim=claim_id)
+                raise ProviderAccessDenied(f"this claim is {why}")
         ad = self.adapters(provider, model)
         label = model or ad.model
         author = claim["author"]
-        if author.get("provider") == provider and author.get("model") == label:
+        if author.get("kind") != "person" and model_identity(author.get("provider"), author.get("model")) \
+                == model_identity(provider, label):
             raise ValueError("a model cannot be the independent verifier of its own claim; choose another model")
         if author.get("kind") == "person":
             independence = "the person's claim"
@@ -358,11 +394,25 @@ class Gateway:
         return {"claim": c, "assessment": assessment}
 
     def resolve_with_test(self, user_id: str, project_id: str, claim_id: str, task_id: str, note: str = "") -> dict:
-        """Settle a claim with a test run the person says checks it: pass verifies, fail refutes."""
+        """Settle a claim with a test run the person says checks it: pass verifies, fail refutes.
+
+        Refused if the workspace changed after the run started, since the result no longer
+        describes the code. The evidence lists every file a model wrote before the run, so the
+        person can see whether the model edited the check itself."""
         t = self.queue.get(user_id, task_id)
         if t.project_id != project_id or t.tool != "run_tests" or t.status != "succeeded" or not t.result:
             raise ValueError("link a finished run_tests task from this project")
+        self.ledger._load(user_id, project_id, claim_id)  # KeyError for a claim of another project
+        writes = [w for w in self.queue.list(user_id, project_id, status="succeeded", limit=10_000)
+                  if w.tool == "write_file"]
+        later = [w.args.get("path") for w in writes
+                 if (w.finished_at or "") > t.started_at or ((w.result or {}).get("undone_at") or "") > t.started_at]
+        if later:
+            raise ValueError(f"the workspace changed after this test run started ({', '.join(map(str, later[:5]))}); "
+                             "run the tests again")
+        by_model = [w.args.get("path") for w in reversed(writes) if w.requested_by == "model"][-20:]
         passed = t.result.get("exit_code") == 0 and not t.result.get("timed_out")
         return self.ledger.resolve(user_id, project_id, claim_id, "verified" if passed else "refuted", by="test",
                                    note=note, evidence={"task_id": task_id, "exit_code": t.result.get("exit_code"),
-                                                        "argv": t.result.get("argv")})
+                                                        "argv": t.result.get("argv"),
+                                                        "files_written_by_models_before_the_run": by_model})

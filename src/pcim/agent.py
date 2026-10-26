@@ -139,11 +139,22 @@ class Agent:
             return None
         return rows[0]["id"]
 
-    def _collab_prefs(self, user_id: str, provider: str, model_label: str, ref: str) -> list[str]:
+    def _collab_prefs(self, user_id: str, provider: str, model_label: str, ref: str) -> list:
         items = [i for i in self.ci.memory.current(user_id)
                  if i.pinned and i.trust.rank >= Trust.USER_STATED.rank and i.kind == "preference"]
-        ok = self.ci.egress.filter(user_id, items, vendor_of(provider), model_label, ref=ref).allowed if items else []
-        return [_clean(i.content) for i in ok]
+        return self.ci.egress.filter(user_id, items, vendor_of(provider), model_label, ref=ref).allowed if items else []
+
+    # Events after which context already sent in a session may no longer be allowed.
+    _CONTEXT_EVENTS = ("consent.revoke", "memory.retract", "memory.delete", "memory.pin", "memory.correct")
+
+    def _context_epoch(self, user_id: str) -> int:
+        """Audit sequence of the latest revocation, retraction, deletion, unpin or correction.
+        A session started before it carries context the person may have withdrawn (in its
+        system section and transcript), so it is not continued; the next message starts a new
+        session whose briefing and preferences are filtered afresh."""
+        q = ("SELECT MAX(seq) AS s FROM audit WHERE user_id=? AND event IN (%s)"
+             % ",".join("?" * len(self._CONTEXT_EVENTS)))
+        return self.store.query(q, (user_id, *self._CONTEXT_EVENTS))[0]["s"] or 0
 
     def _new_session(self, user_id: str, project_id: str, provider: str, model: str | None) -> tuple[str, dict]:
         prev = self.open_session(user_id, project_id)
@@ -153,9 +164,10 @@ class Agent:
         ad = self.adapter(provider, model)
         prefs = self._collab_prefs(user_id, provider, ad.model, ref=sid)
         system = SYSTEM + (("\n\nHow this person has asked you to work with them:\n" +
-                            "\n".join(f"- {p}" for p in prefs)) if prefs else "")
+                            "\n".join(f"- {_clean(p.content)}" for p in prefs)) if prefs else "")
         st = {"provider": provider, "model": model, "system": system, "messages": [], "pending": None,
-              "display": [], "cost_usd": 0.0, "cost_unknown": False, "reflection": None, "briefing_sent": False}
+              "display": [], "cost_usd": 0.0, "cost_unknown": False, "reflection": None, "briefing_sent": False,
+              "system_memory_items": [p.id for p in prefs], "context_epoch": self._context_epoch(user_id)}
         self.store.execute("INSERT INTO sessions VALUES (?,?,?,?,?,?,?,?,?)",
                            (sid, user_id, project_id, now, now, "open", provider, model or ad.model,
                             self.store.seal_json(self.ws.project_key(user_id, project_id), st, sid)))
@@ -174,6 +186,8 @@ class Agent:
             st = self._load(user_id, project_id, sid)
             if st["provider"] != provider or st["model"] != model:
                 sid = None  # a different model starts a new session; thinking blocks are model-bound
+            elif st.get("context_epoch", 0) != self._context_epoch(user_id) and not st["pending"]:
+                sid = None  # consent or memory changed since this session began
         if not sid:
             sid, st = self._new_session(user_id, project_id, provider, model)
             st = self._load(user_id, project_id, sid)
@@ -184,16 +198,19 @@ class Agent:
             parts = []
             disclosure = {"at": utcnow().isoformat(), "session": sid, "provider": provider, "vendor": vendor,
                           "model": model or ad.model, "briefing_sha256": None, "briefing_text": None,
-                          "briefing_notes": [], "briefing_claims": []}
+                          "briefing_notes": [], "briefing_claims": [], "briefing_withheld": [],
+                          "system_memory_items": []}
             if not st["briefing_sent"]:
-                b = self.briefing(user_id, project_id)
+                b = self.briefing(user_id, project_id, vendor=vendor)
                 rendered = render_briefing(b)
                 parts.append(_fence("project_briefing", secrets.token_hex(6), rendered))
                 st["briefing_sent"] = True
                 disclosure.update(briefing_sha256=hashlib.sha256(rendered.encode()).hexdigest(), briefing_text=rendered,
                                   briefing_notes=[n["id"] for k in ("open_questions", "decisions", "next_steps")
                                                   for n in b[k]],
-                                  briefing_claims=[c["id"] for c in b.get("claims", [])])
+                                  briefing_claims=[c["id"] for c in b.get("claims", [])],
+                                  briefing_withheld=b.get("withheld", []),
+                                  system_memory_items=st.get("system_memory_items", []))
             cx = self.ci.select_context(user_id, text, provider, ad.model, self.ci.budget_tokens, ref=sid)
             # Pinned collaboration preferences already sit in the system section; every other
             # selected item, pinned or not, goes in the fenced data block.
@@ -217,16 +234,37 @@ class Agent:
                               memory_items=len(notes), memory_withheld=len(cx.decision.blocked))
             st["display"].append({"role": "user", "text": text, "at": utcnow().isoformat(),
                                   "context_items": [i.id for i in notes]})
+            self._save(user_id, project_id, sid, st)  # the disclosure survives even if the model call fails
             return self._run(user_id, project_id, sid, st)
 
-    def briefing(self, user_id: str, project_id: str) -> dict:
-        b = self.ws.briefing(user_id, project_id)
+    def briefing(self, user_id: str, project_id: str, vendor: str | None = None) -> dict:
+        """The project briefing; with `vendor`, as that vendor may see it (Workspace.briefing)."""
+        b = self.ws.briefing(user_id, project_id, vendor=vendor)
         if b.get("last_session"):  # statuses change after a session closes (a late denial, an approval)
             sid = b["last_session"]["session"]
-            b["last_session"]["lines"] = self._reflection_lines(user_id, project_id, sid,
-                                                                self._load(user_id, project_id, sid))
+            last = self._load(user_id, project_id, sid)
+            lines = self._reflection_lines(user_id, project_id, sid, last)
+            if vendor is not None:  # the last model message may quote memory this vendor may not see
+                exposure = list(last.get("system_memory_items", []))
+                for d in last.get("disclosures", []):
+                    exposure += d.get("memory_items", [])
+                why = self.ws.derived_blocked(user_id, exposure, vendor)
+                if why:
+                    lines = [x for x in lines if not x.startswith("CI's last message")]
+                    b["withheld"].append({"id": f"{sid}#last_message", "reason": why})
+            b["last_session"]["lines"] = lines
         if self.ledger is not None:
-            b["claims"] = self.ledger.summary(user_id, project_id)
+            claims = self.ledger.summary(user_id, project_id)
+            if vendor is not None:
+                kept = []
+                for c in claims:
+                    why = self.ws.derived_blocked(user_id, c["lineage"], vendor) if c["lineage"] else None
+                    if why:
+                        b["withheld"].append({"id": c["id"], "reason": why})
+                    else:
+                        kept.append(c)
+                claims = kept
+            b["claims"] = claims
         return b
 
     def _result_block(self, t: Task) -> dict:
@@ -253,6 +291,13 @@ class Agent:
                 st["display"].append({"role": "system", "text": note, "at": utcnow().isoformat()})
                 self._save(user_id, project_id, sid, st)
                 return self._turn(user_id, sid, st, "blocked", note, touched)
+            if st.get("context_epoch", 0) != self._context_epoch(user_id):
+                self.audit.append(user_id, "session.stopped", project=project_id, session=sid, why="context-changed")
+                note = ("Stopped: your consent or memory changed since this session began, and its earlier messages "
+                        "may carry what you withdrew. Send a new message to continue in a fresh session.")
+                st["display"].append({"role": "system", "text": note, "at": utcnow().isoformat()})
+                self._save(user_id, project_id, sid, st)
+                return self._turn(user_id, sid, st, "stopped", note, touched)
             step = ad.agent_step(st["system"], st["messages"], TOOLS)
             st["messages"].append({"role": "assistant", "content": step.content})
             if step.cost_usd is None:

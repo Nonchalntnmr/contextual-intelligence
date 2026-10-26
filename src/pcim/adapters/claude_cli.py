@@ -51,6 +51,13 @@ RETRY_NOTE = "Your previous reply was not a valid JSON object of that shape. Rep
 
 # Variables that would attach the child CLI to the parent's IDE or session.
 _DROP_ENV = ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SSE_PORT", "ENABLE_IDE_INTEGRATION")
+
+
+def _reroutes(key: str) -> bool:
+    """Variables that would send the request somewhere other than Anthropic (Bedrock, Vertex,
+    Foundry, a proxy). Consent for this provider is consent for the vendor Anthropic, so
+    the child is never pointed elsewhere."""
+    return key.startswith("CLAUDE_CODE_USE_") or (key.startswith("ANTHROPIC_") and key.endswith("BASE_URL"))
 _FENCE = re.compile(r"^```(?:json)?\s*|\s*```$")
 
 
@@ -70,15 +77,19 @@ def _render_turns(messages: list[dict], nonce: str) -> str:
         elif isinstance(c, str):
             out.append(f'<turn n="{n}" role="person" nonce="{nonce}">\n{c}\n</turn nonce="{nonce}">')
         else:
-            parts = []
+            results, said = [], []
             for b in c:
                 if b.get("type") == "tool_result":
                     body = b["content"] if isinstance(b["content"], str) else json.dumps(b["content"])
-                    parts.append(f"[{b['tool_use_id']}] {'did not run' if b.get('is_error') else 'result'}: {body}")
-                elif b.get("type") == "text":
-                    parts.append(b["text"])
-            out.append(f'<turn n="{n}" role="ci_tool_results" nonce="{nonce}">\n' + "\n\n".join(parts)
-                       + f'\n</turn nonce="{nonce}">')
+                    results.append(f"[{b['tool_use_id']}] {'did not run' if b.get('is_error') else 'result'}: {body}")
+                elif b.get("type") == "text":  # the person, after a session stopped on tool results
+                    said.append(b["text"])
+            if results:
+                out.append(f'<turn n="{n}" role="ci_tool_results" nonce="{nonce}">\n' + "\n\n".join(results)
+                           + f'\n</turn nonce="{nonce}">')
+            if said:
+                out.append(f'<turn n="{n}" role="person" nonce="{nonce}">\n' + "\n\n".join(said)
+                           + f'\n</turn nonce="{nonce}">')
     return "\n\n".join(out)
 
 
@@ -118,7 +129,7 @@ class ClaudeCLIAdapter:
 
     def _call(self, system: str, prompt: str) -> tuple[dict, float]:
         self.workdir.mkdir(parents=True, exist_ok=True, mode=0o700)
-        env = {k: v for k, v in os.environ.items() if k not in _DROP_ENV}
+        env = {k: v for k, v in os.environ.items() if k not in _DROP_ENV and not _reroutes(k)}
         fd, sys_path = tempfile.mkstemp(prefix=".system-", suffix=".txt", dir=self.workdir)
         try:
             with os.fdopen(fd, "w") as fh:  # mkstemp creates it 0600

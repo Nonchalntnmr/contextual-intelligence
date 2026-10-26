@@ -265,7 +265,7 @@ def test_demo_A_resume_across_processes(tmp_path, repo):
     assert "proposed running the tests — awaiting approval" in b["last_session"]["lines"]
     assert not any(line.startswith("ran the tests") for line in b["last_session"]["lines"])
     turn = agent2.send("u", p.id, "where were we?")
-    assert TAG in turn.text and "moving-average baseline" in turn.text and "[model-written]" in turn.text
+    assert TAG in turn.text and "moving-average baseline" in turn.text and "[model-written by mock-agent" in turn.text
 
 
 def test_demo_E_collaboration_preference_persists(tmp_path, repo):

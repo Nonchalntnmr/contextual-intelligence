@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import os
 import time
+from urllib.parse import urlparse
 
 import httpx
 
@@ -42,7 +43,11 @@ class OpenAICompatAdapter:
         timeout: float = 120.0,
     ):
         self.model, self.provider = model, provider
-        self.base_url = (base_url or os.environ.get("PCIM_OPENAI_BASE_URL") or DEFAULT_BASE[provider]).rstrip("/")
+        env_base = os.environ.get("PCIM_OPENAI_BASE_URL" if provider == "openai" else "PCIM_LOCAL_BASE_URL")
+        self.base_url = (base_url or env_base or DEFAULT_BASE[provider]).rstrip("/")
+        if provider == "local" and urlparse(self.base_url).hostname not in ("127.0.0.1", "localhost", "::1"):
+            # "local" is the one provider that may receive SENSITIVE items; it must stay on this machine
+            raise ProviderError(f"the local provider must be on this machine, not {self.base_url}")
         key = api_key or os.environ.get("OPENAI_API_KEY" if provider == "openai" else "PCIM_LOCAL_API_KEY", "")
         if provider == "openai" and not key:
             raise ProviderError("OPENAI_API_KEY is not set")
@@ -91,10 +96,11 @@ class OpenAICompatAdapter:
             c = m["content"]
             if m["role"] == "assistant":
                 text = "".join(b.get("text", "") for b in c if b.get("type") == "text")
-                msg = {"role": "assistant", "content": text or None}
                 calls = [{"id": b["id"], "type": "function",
                           "function": {"name": b["name"], "arguments": json.dumps(b["input"])}}
                          for b in c if b.get("type") == "tool_use"]
+                # content may be null only alongside tool_calls; an empty turn stays a valid message
+                msg = {"role": "assistant", "content": text or (None if calls else "")}
                 if calls:
                     msg["tool_calls"] = calls
                 out.append(msg)
@@ -127,8 +133,11 @@ class OpenAICompatAdapter:
             r.raise_for_status()
         except httpx.HTTPError as e:
             raise ProviderError(f"{self.provider} request failed: {e}") from e
-        d = r.json()
-        choice = d["choices"][0]
+        try:
+            d = r.json()
+            choice = d["choices"][0]
+        except (ValueError, KeyError, IndexError, TypeError):
+            raise ProviderError(f"{self.provider} returned a malformed response") from None
         msg = choice.get("message") or {}
         refusal = bool(msg.get("refusal"))
         text = msg.get("refusal") if refusal else (msg.get("content") or "")

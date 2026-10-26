@@ -203,13 +203,14 @@ class TaskQueue:
         try:
             if t.tool == "record_note":
                 note = self.ws.add_note(user_id, t.project_id, t.args["kind"], t.args["text"], source="model",
-                                        by=self._author(t))
+                                        by=self._author(t), lineage=self.exposure(user_id, t))
                 result = {"note_id": note["id"]}
             elif t.tool == "record_claim":
                 if self.claims is None:
                     raise ToolError("the claim ledger is not enabled here")
                 c = self.claims.add(user_id, t.project_id, t.args["statement"], t.args["evidence"],
-                                    t.args["uncertainty"], author={"kind": "model", **self._author(t)})
+                                    t.args["uncertainty"], author={"kind": "model", **self._author(t)},
+                                    lineage=self.exposure(user_id, t))
                 result = {"claim_id": c["id"], "status": c["status"], "evidence_refs": c["evidence_refs"]}
             else:
                 spec = self.ws.workspace_auth(user_id, t.project_id)["spec"]
@@ -233,6 +234,20 @@ class TaskQueue:
         rows = self.store.query("SELECT provider, model FROM sessions WHERE id=?", (t.session_id,))
         return {"provider": rows[0]["provider"], "model": rows[0]["model"], "session": t.session_id} if rows else {}
 
+    def exposure(self, user_id: str, t: Task) -> list[str]:
+        """Memory items the model behind this task had been shown in its session so far:
+        what anything it writes may be derived from."""
+        if not t.session_id:
+            return []
+        rows = self.store.query("SELECT state_ct FROM sessions WHERE id=? AND user_id=?", (t.session_id, user_id))
+        if not rows:
+            return []
+        st = self.store.open_json(self._key(user_id, t.project_id), rows[0]["state_ct"], t.session_id)
+        ids = list(st.get("system_memory_items", []))
+        for d in st.get("disclosures", []):
+            ids += d.get("memory_items", [])
+        return list(dict.fromkeys(ids))
+
     def undo(self, user_id: str, task_id: str) -> dict:
         """Restore the file a write_file task replaced (or remove the one it created)."""
         from .governor import jail
@@ -247,7 +262,7 @@ class TaskQueue:
             p.unlink(missing_ok=True)
         else:
             p.write_text(t.result["backup"])
-        res = dict(t.result, undone=True)
+        res = dict(t.result, undone=True, undone_at=utcnow().isoformat())
         self._set(task_id, result_ct=self._seal(user_id, t.project_id, res, task_id, "result"))
         self.audit.append(user_id, "task.undo", task=task_id)
         return {"undone": True, "path": t.args["path"]}

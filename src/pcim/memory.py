@@ -168,6 +168,7 @@ class TemporalMemory:
         if old.id not in res.superseded:  # un-keyed item: close it explicitly
             self.store.update_item_meta(old.id, superseded_at=utcnow(), superseded_by=res.item.id)
             res.superseded.append(old.id)
+        self.audit.append(user_id, "memory.correct", item=old.id, by=res.item.id)
         return res
 
     def confirm(self, user_id: str, item_id: str, promote: bool = True) -> MemoryItem:

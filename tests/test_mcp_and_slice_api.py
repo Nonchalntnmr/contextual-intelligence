@@ -44,7 +44,7 @@ def test_mcp_context_is_consent_filtered_and_agent_memories_are_gated(tmp_path):
 
     p = Workspace(ci).create_project("u", "Crowding")
     assert _call(srv, "ci_add_project_note", {"project_id": p.id, "kind": "decision", "text": "drop rho(J)"}).startswith("recorded")
-    assert "drop rho(J) [model-written]" in _call(srv, "ci_project_briefing", {"project_id": p.id})
+    assert "[model-written by an MCP client" in _call(srv, "ci_project_briefing", {"project_id": p.id})
 
 
 def test_vertical_slice_over_http(tmp_path):

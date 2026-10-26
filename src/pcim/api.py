@@ -333,7 +333,7 @@ def create_app(ci: PersonalCI) -> FastAPI:
     from .exchange import ClaimLedger, Gateway
     from .governor import Governor
     from .tasks import TaskQueue, TaskStateError
-    from .workspace import Workspace, WorkspaceError
+    from .workspace import Workspace, WorkspaceError, render_briefing
 
     ws = Workspace(ci)
     ledger = ClaimLedger(ws)
@@ -394,6 +394,23 @@ def create_app(ci: PersonalCI) -> FastAPI:
     @app.get("/v1/projects/{pid}/disclosures")
     def disclosures(pid: str, uid: str = Depends(user)):
         return guard(agent.disclosures, uid, pid)
+
+    @app.get("/v1/projects/{pid}/briefing")
+    def briefing_preview(pid: str, vendor: str, uid: str = Depends(user)):
+        """What a new session with `vendor` would be given, and what would be withheld and why."""
+        if vendor not in registry.VENDORS:
+            raise HTTPException(422, f"vendor must be one of {registry.VENDORS}")
+        b = guard(agent.briefing, uid, pid, vendor)
+        return {"vendor": vendor, "allowed": vendor in ws.provider_vendors(uid, pid), "text": render_briefing(b),
+                "withheld": b["withheld"]}
+
+    @app.post("/v1/projects/{pid}/notes/{nid}/release")
+    def release_note(pid: str, nid: str, uid: str = Depends(user)):
+        return guard(ws.release_note, uid, pid, nid)
+
+    @app.post("/v1/projects/{pid}/claims/{cid}/release")
+    def release_claim(pid: str, cid: str, uid: str = Depends(user)):
+        return guard(ledger.release, uid, pid, cid)
 
     @app.get("/v1/projects/{pid}/claims")
     def claims(pid: str, uid: str = Depends(user)):

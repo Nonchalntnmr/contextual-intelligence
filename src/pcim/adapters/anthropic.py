@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import os
 import time
 
 from .base import AgentStep, ModelResponse, RenderedPrompt, Usage
@@ -42,7 +43,11 @@ class AnthropicAdapter:
         self.effort = effort
         self.max_tokens = max_tokens
         self.fallbacks = fallbacks and model in FALLBACK_MODELS
-        self.client = client or anthropic.Anthropic(timeout=timeout)
+        # The endpoint is pinned: ANTHROPIC_BASE_URL in the environment would otherwise send
+        # content a project granted to Anthropic to a proxy. PCIM_ANTHROPIC_BASE_URL is the
+        # explicit opt-in for an endpoint the person counts as Anthropic.
+        self.client = client or anthropic.Anthropic(
+            timeout=timeout, base_url=os.environ.get("PCIM_ANTHROPIC_BASE_URL") or "https://api.anthropic.com")
 
     def _request(self, prompt: RenderedPrompt, max_tokens: int | None) -> dict:
         return dict(

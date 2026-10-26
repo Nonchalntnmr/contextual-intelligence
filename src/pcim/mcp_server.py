@@ -28,6 +28,7 @@ from mcp.server.mcpserver import MCPServer
 from .adapters.render import _clean, _label
 from .engine import PersonalCI
 from .memory import ConsentRequired
+from .registry import vendor_of
 from .types import KINDS, Trust, new_id, utcnow
 from .workspace import NOTE_KINDS, ProviderAccessDenied, Workspace, render_briefing
 
@@ -44,11 +45,13 @@ def build_server(ci: PersonalCI, user_id: str, provider: str = "anthropic") -> M
     ws = Workspace(ci)
     server = MCPServer("personal-ci", instructions=INSTRUCTIONS, version="0.1.0")
 
+    vendor = vendor_of(provider)
+
     @server.tool()
     def ci_list_projects() -> list[dict]:
-        """List this person's projects with their objectives."""
+        """List this person's projects (those this agent's provider may see) with their objectives."""
         return [{"id": p.id, "name": p.name, "objective": p.objective, "updated_at": p.updated_at}
-                for p in ws.list_projects(user_id)]
+                for p in ws.list_projects(user_id) if vendor in ws.provider_vendors(user_id, p.id)]
 
     @server.tool()
     def ci_project_briefing(project_id: str) -> str:
@@ -58,7 +61,7 @@ def build_server(ci: PersonalCI, user_id: str, provider: str = "anthropic") -> M
         except ProviderAccessDenied as e:
             return f"error: {e}. The person can allow it in the project's model access settings."
         nonce = secrets.token_hex(6)
-        body = render_briefing(ws.briefing(user_id, project_id))
+        body = render_briefing(ws.briefing(user_id, project_id, vendor=vendor))
         ci.audit.append(user_id, "mcp.briefing", project=project_id, provider=provider)
         return f'<project_briefing nonce="{nonce}">\n{body}\n</project_briefing nonce="{nonce}">'
 
@@ -106,7 +109,12 @@ def build_server(ci: PersonalCI, user_id: str, provider: str = "anthropic") -> M
         """Record an open_question, decision or next_step on a project. Shown to the person as model-written."""
         if kind not in NOTE_KINDS or kind == "summary":
             return "error: kind must be open_question, decision or next_step"
-        return "recorded " + ws.add_note(user_id, project_id, kind, text, source="model")["id"]
+        try:
+            ws.require_provider(user_id, project_id, provider, purpose="mcp-note")
+        except ProviderAccessDenied as e:
+            return f"error: {e}"
+        return "recorded " + ws.add_note(user_id, project_id, kind, text, source="model",
+                                         by={"provider": f"mcp:{provider}", "model": "an MCP client"})["id"]
 
     @server.tool()
     def ci_report_outcome(interaction_id: str, task_success: bool | None = None, rating: int | None = None) -> str:

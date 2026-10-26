@@ -152,8 +152,8 @@ def test_verification_sends_only_what_the_recipient_may_see(tmp_path, repo):
         "verdict": "supported", "rationale": "the read shows alpha", "counter_claim": "", "check": ""}}]}])
     agent.set_adapter("mock", None, verifier)
     out = gw.verify_claim("u", p.id, c["id"], "mock")
-    sent = json.dumps(verifier.requests[0])
-    assert "alpha" in sent and "alpha is the baseline" in sent and "interviewing" not in sent
+    sent = verifier.requests[0]["messages"][0]["content"]
+    assert '"content": "alpha\\n"' in sent and "alpha is the baseline" in sent and "interviewing" not in sent
     withheld = {w["ref"]: w["reason"] for w in out["assessment"]["evidence_withheld"]}
     assert withheld[theirs.id] == "belongs to another project" and withheld[diary.id].startswith("egress: no-egress-grant")
     assert withheld["task_00000000000000000000"] == "unknown task"
