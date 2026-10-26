@@ -16,12 +16,15 @@ from __future__ import annotations
 
 import dataclasses
 import datetime as dt
+import logging
 import time
 
 from .governor import RISK, Governor
 from .tools import Cancelled, Executor, ToolError, validate_args
 from .types import new_id, utcnow
 from .workspace import Workspace
+
+log = logging.getLogger(__name__)
 
 LIVE = ("awaiting_approval", "approved", "running")
 TERMINAL = ("succeeded", "failed", "cancelled", "denied", "interrupted", "expired")
@@ -110,6 +113,12 @@ class TaskQueue:
     # ------------------------------------------------------------------ lifecycle
     def propose(self, user_id: str, project_id: str, tool: str, args: dict, requested_by: str = "model",
                 session_id: str | None = None, tool_use_id: str | None = None) -> Task:
+        if session_id and tool_use_id:  # the same model call proposed twice is one task, never a second side effect
+            dup = self.store.query("SELECT id FROM tasks WHERE session_id=? AND tool_use_id=? AND user_id=?",
+                                   (session_id, tool_use_id, user_id))
+            if dup:
+                self.audit.append(user_id, "task.duplicate", task=dup[0]["id"], project=project_id)
+                return self.get(user_id, dup[0]["id"])
         tid, now = new_id("task"), utcnow().isoformat()
         try:
             validate_args(tool, args)
@@ -222,6 +231,9 @@ class TaskQueue:
             status, reason, result = "cancelled", str(e), None
         except (ToolError, OSError, ValueError) as e:
             status, reason, result = "failed", str(e)[:500], None
+        except Exception as e:  # a bug, not a tool outcome: logged, and the task fails visibly instead of hanging in "running"
+            log.exception("task %s (%s) raised", task_id, t.tool)
+            status, reason, result = "failed", f"internal error ({type(e).__name__})", None
         ms = (time.perf_counter() - t0) * 1000
         self._set(task_id, status=status, reason=reason, finished_at=utcnow().isoformat(), duration_ms=ms,
                   result_ct=self._seal(user_id, t.project_id, result, task_id, "result") if result is not None else None)

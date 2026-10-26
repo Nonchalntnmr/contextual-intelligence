@@ -88,6 +88,6 @@ def test_vertical_slice_over_http(tmp_path):
     auto = c2.post(f"/v1/projects/{pid}/chat", headers=h, json={"message": "run tests"}).json()
     assert auto["status"] == "done" and auto["tasks"][0]["authorization_id"]
     assert c2.post("/v1/autonomy/halt", headers=h).json()["halted"]
-    blocked = c2.post(f"/v1/projects/{pid}/chat", headers=h, json={"message": "read notes.md"}).json()
-    assert blocked["tasks"][0]["status"] == "denied" and "halted" in blocked["tasks"][0]["reason"]
+    blocked = c2.post(f"/v1/projects/{pid}/chat", headers=h, json={"message": "read notes.md"})
+    assert blocked.status_code == 409 and "halted" in blocked.json()["detail"]  # no model call while halted
     assert c2.post(f"/v1/projects/{pid}/workspace", headers=h, json={"root": "/"}).status_code == 422

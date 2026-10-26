@@ -29,6 +29,7 @@ import json
 import os
 import secrets
 import threading
+import time
 
 from .adapters.mock_agent import MockAgentAdapter
 from .adapters.render import _clean, _label
@@ -55,6 +56,24 @@ IDLE_SECONDS = 2 * 3600
 TOOLS = [{"name": n, **s} for n, s in TOOL_SCHEMAS.items()]
 
 
+@dataclasses.dataclass(frozen=True)
+class TurnLimits:
+    """Hard limits on one turn: from a message (or an approval) until the loop pauses or ends.
+
+    Checked before every model call, so a turn stops before it would exceed them, never
+    after. The cost limit needs the provider to report cost; for an unpriced model it cannot
+    bind and the token limit is the backstop."""
+
+    max_rounds: int = MAX_ROUNDS
+    max_tool_calls_per_step: int = 16
+    max_tool_calls: int = 40
+    max_seconds: float = 900.0
+    max_cost_usd: float | None = 2.0
+    max_input_tokens: int | None = 1_000_000
+
+
+# Why a turn stopped: done | awaiting_approval | blocked (provider access) | stopped with one
+# of max_rounds, max_tool_calls, max_seconds, max_cost, max_tokens, halted, context_changed.
 @dataclasses.dataclass
 class AgentTurn:
     session_id: str
@@ -62,10 +81,24 @@ class AgentTurn:
     text: str
     tasks: list[dict]
     pending: list[str]
-    cost_usd: float | None
+    cost_usd: float | None  # the session's running total; None if any step was unpriced
+    stop_reason: str | None = None
+    usage: dict | None = None  # this turn's tokens
 
     def as_dict(self) -> dict:
         return dataclasses.asdict(self)
+
+
+_STOP_NOTES = {
+    "max_rounds": "Stopped after {n} model steps in one turn. Send a message to continue.",
+    "max_tool_calls": "Stopped: this turn reached its limit on tool calls. Send a message to continue.",
+    "max_seconds": "Stopped: this turn ran past its time limit. Send a message to continue.",
+    "max_cost": "Stopped: this turn reached its cost limit. Send a message to continue.",
+    "max_tokens": "Stopped: this turn reached its input-token limit. Send a message to continue.",
+    "halted": "Stopped: execution is halted. Resume it in the Autonomy view to continue.",
+    "context_changed": ("Stopped: your consent or memory changed since this session began, and its earlier messages "
+                        "may carry what you withdrew. Send a new message to continue in a fresh session."),
+}
 
 
 def _fence(tag: str, nonce: str, body: str) -> str:
@@ -73,8 +106,9 @@ def _fence(tag: str, nonce: str, body: str) -> str:
 
 
 class Agent:
-    def __init__(self, ci: PersonalCI, ws: Workspace, queue: TaskQueue, ledger=None):
+    def __init__(self, ci: PersonalCI, ws: Workspace, queue: TaskQueue, ledger=None, limits: TurnLimits | None = None):
         self.ci, self.ws, self.queue, self.ledger = ci, ws, queue, ledger
+        self.limits = limits or TurnLimits()
         self.store, self.audit = ci.store, ci.audit
         self._adapters: dict[tuple[str, str | None], object] = {}
         self._locks: dict[str, threading.Lock] = {}
@@ -181,6 +215,8 @@ class Agent:
         if not text.strip():
             raise ValueError("empty message")
         vendor = self.ws.require_provider(user_id, project_id, provider)  # before anything is read or sent
+        if self.ws.is_halted(user_id):  # the emergency stop covers model calls, not only tools
+            raise RuntimeError("execution is halted; resume it before sending")
         sid = None if new_session else self.open_session(user_id, project_id)
         if sid:
             st = self._load(user_id, project_id, sid)
@@ -192,6 +228,7 @@ class Agent:
             sid, st = self._new_session(user_id, project_id, provider, model)
             st = self._load(user_id, project_id, sid)
         with self._lock(sid):
+            st = self._load(user_id, project_id, sid)  # again under the lock: a concurrent turn may have advanced it
             if st["pending"]:
                 raise RuntimeError("this session is waiting on an approval; approve or deny it first")
             ad = self.adapter(provider, model)
@@ -282,36 +319,42 @@ class Agent:
         ad = self.adapter(st["provider"], st["model"])
         touched: list[str] = []
         text = ""
-        for _ in range(MAX_ROUNDS):
+        turn = {"t0": time.monotonic(), "tool_calls": 0, "cost_usd": 0.0,
+                "usage": {"input_tokens": 0, "output_tokens": 0, "steps": 0}}
+        for _ in range(self.limits.max_rounds):
             if not self.ws.provider_allowed(user_id, project_id, st["provider"]):
                 vendor = vendor_of(st["provider"])
                 self.audit.append(user_id, "egress.blocked", project=project_id, provider=st["provider"],
                                   vendor=vendor, purpose="session", session=sid)
-                note = f"Stopped: {vendor} no longer has access to this project, so nothing more was sent to it."
-                st["display"].append({"role": "system", "text": note, "at": utcnow().isoformat()})
+                return self._stop(user_id, project_id, sid, st, touched, turn, "blocked", "provider_revoked",
+                                  f"Stopped: {vendor} no longer has access to this project, so nothing more was sent to it.")
+            why = self._limit_reached(user_id, st, turn)
+            if why:
+                return self._stop(user_id, project_id, sid, st, touched, turn, "stopped", why, _STOP_NOTES[why])
+            try:
+                step = ad.agent_step(st["system"], st["messages"], TOOLS)
+            except Exception as e:  # recorded and re-raised, never swallowed; the transcript so far is saved
+                self.audit.append(user_id, "model.error", project=project_id, session=sid, provider=st["provider"],
+                                  error=type(e).__name__)
                 self._save(user_id, project_id, sid, st)
-                return self._turn(user_id, sid, st, "blocked", note, touched)
-            if st.get("context_epoch", 0) != self._context_epoch(user_id):
-                self.audit.append(user_id, "session.stopped", project=project_id, session=sid, why="context-changed")
-                note = ("Stopped: your consent or memory changed since this session began, and its earlier messages "
-                        "may carry what you withdrew. Send a new message to continue in a fresh session.")
-                st["display"].append({"role": "system", "text": note, "at": utcnow().isoformat()})
-                self._save(user_id, project_id, sid, st)
-                return self._turn(user_id, sid, st, "stopped", note, touched)
-            step = ad.agent_step(st["system"], st["messages"], TOOLS)
+                raise
             st["messages"].append({"role": "assistant", "content": step.content})
-            if step.cost_usd is None:
-                st["cost_unknown"] = True
-            else:
-                st["cost_usd"] += step.cost_usd
+            self._account(st, turn, step)
             text = step.text
             if step.text:
                 st["display"].append({"role": "ci", "text": step.text, "at": utcnow().isoformat(), "model": step.model})
             if not step.tool_uses:
                 self._save(user_id, project_id, sid, st)
-                return self._turn(user_id, sid, st, "done", text, touched)
+                return self._turn(user_id, sid, st, "done", text, touched, usage=turn["usage"])
+            lim = self.limits
+            room = min(lim.max_tool_calls_per_step, max(0, lim.max_tool_calls - turn["tool_calls"]))
             results, pending = {}, {}
-            for tu in step.tool_uses:
+            for i, tu in enumerate(step.tool_uses):
+                if i >= room:  # every tool_use still gets a result, so the transcript stays valid
+                    results[tu["id"]] = {"type": "tool_result", "tool_use_id": tu["id"], "is_error": True,
+                                         "content": f"not run: this turn's limit on tool calls was reached "
+                                                    f"({lim.max_tool_calls_per_step} per step, {lim.max_tool_calls} per turn)"}
+                    continue
                 t = self.queue.propose(user_id, project_id, tu["name"], tu["input"], requested_by="model",
                                        session_id=sid, tool_use_id=tu["id"])
                 touched.append(t.id)
@@ -320,18 +363,60 @@ class Agent:
                     pending[tu["id"]] = t.id
                 else:
                     results[tu["id"]] = self._result_block(t)
+            turn["tool_calls"] += min(room, len(step.tool_uses))
             if pending:
                 st["pending"] = {"order": [tu["id"] for tu in step.tool_uses], "results": results, "tasks": pending}
                 self._save(user_id, project_id, sid, st)
-                return self._turn(user_id, sid, st, "awaiting_approval", text, touched)
+                return self._turn(user_id, sid, st, "awaiting_approval", text, touched, usage=turn["usage"])
             st["messages"].append({"role": "user", "content": [results[tu["id"]] for tu in step.tool_uses]})
-        self._save(user_id, project_id, sid, st)
-        return self._turn(user_id, sid, st, "stopped", text + f"\n\n[stopped after {MAX_ROUNDS} tool rounds]", touched)
+            self._save(user_id, project_id, sid, st)  # each round is durable: tool results never go missing
+        return self._stop(user_id, project_id, sid, st, touched, turn, "stopped", "max_rounds",
+                          _STOP_NOTES["max_rounds"].format(n=self.limits.max_rounds))
 
-    def _turn(self, user_id: str, sid: str, st: dict, status: str, text: str, touched: list[str]) -> AgentTurn:
+    def _limit_reached(self, user_id: str, st: dict, turn: dict) -> str | None:
+        lim = self.limits
+        if st.get("context_epoch", 0) != self._context_epoch(user_id):
+            return "context_changed"
+        if self.ws.is_halted(user_id):
+            return "halted"
+        if turn["tool_calls"] >= lim.max_tool_calls:
+            return "max_tool_calls"
+        if time.monotonic() - turn["t0"] > lim.max_seconds:
+            return "max_seconds"
+        if lim.max_cost_usd is not None and turn["cost_usd"] >= lim.max_cost_usd:
+            return "max_cost"
+        if lim.max_input_tokens is not None and turn["usage"]["input_tokens"] >= lim.max_input_tokens:
+            return "max_tokens"
+        return None
+
+    @staticmethod
+    def _account(st: dict, turn: dict, step) -> None:
+        u = step.usage
+        inp = u.input_tokens + u.cache_read_tokens + u.cache_write_tokens
+        for d in (st.setdefault("usage", {"input_tokens": 0, "output_tokens": 0, "steps": 0}), turn["usage"]):
+            d["input_tokens"] += inp
+            d["output_tokens"] += u.output_tokens
+            d["steps"] += 1
+        if step.cost_usd is None:
+            st["cost_unknown"] = True
+        else:
+            st["cost_usd"] += step.cost_usd
+            turn["cost_usd"] += step.cost_usd
+
+    def _stop(self, user_id: str, project_id: str, sid: str, st: dict, touched: list[str], turn: dict,
+              status: str, reason: str, note: str) -> AgentTurn:
+        if reason != "provider_revoked":  # that one is audited as egress.blocked
+            self.audit.append(user_id, "session.stopped", project=project_id, session=sid, why=reason)
+        st["display"].append({"role": "system", "text": note, "at": utcnow().isoformat()})
+        self._save(user_id, project_id, sid, st)
+        return self._turn(user_id, sid, st, status, note, touched, stop_reason=reason, usage=turn["usage"])
+
+    def _turn(self, user_id: str, sid: str, st: dict, status: str, text: str, touched: list[str],
+              stop_reason: str | None = None, usage: dict | None = None) -> AgentTurn:
         tasks = [self.queue.get(user_id, t).public() for t in touched]
         pending = list(st["pending"]["tasks"].values()) if st.get("pending") else []
-        return AgentTurn(sid, status, text, tasks, pending, None if st["cost_unknown"] else round(st["cost_usd"], 6))
+        return AgentTurn(sid, status, text, tasks, pending, None if st["cost_unknown"] else round(st["cost_usd"], 6),
+                         stop_reason, usage)
 
     def resolve(self, user_id: str, task_id: str, approve: bool, reason: str = "") -> AgentTurn | dict:
         """Approve or deny a pending task; resume its session once the whole step is resolved."""
@@ -417,7 +502,7 @@ class Agent:
             events.append(e)
         return {"session_id": sid, "status": st["_row"]["status"], "provider": st["provider"], "events": events,
                 "pending": list(st["pending"]["tasks"].values()) if st.get("pending") else [],
-                "cost_usd": None if st["cost_unknown"] else st["cost_usd"]}
+                "cost_usd": None if st["cost_unknown"] else st["cost_usd"], "usage": st.get("usage")}
 
     def disclosures(self, user_id: str, project_id: str) -> list[dict]:
         """What each provider was sent from this project, message by message, oldest first."""
