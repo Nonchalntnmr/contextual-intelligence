@@ -157,6 +157,7 @@ class ClaimLedger:
         return self.public(self._load(user_id, project_id, claim_id))
 
     def list(self, user_id: str, project_id: str) -> list[dict]:
+        self.ws.project_key(user_id, project_id)  # KeyError (404) for a project that is not this user's
         rows = self.store.query("SELECT id FROM claims WHERE user_id=? AND project_id=? ORDER BY created_at",
                                 (user_id, project_id))
         return [self.get(user_id, project_id, r["id"]) for r in rows]

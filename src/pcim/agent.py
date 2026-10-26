@@ -33,7 +33,7 @@ import time
 
 from .adapters.mock_agent import MockAgentAdapter
 from .adapters.render import _clean, _label
-from .engine import PersonalCI
+from .engine import PersonalCI, in_scope
 from .registry import vendor_of
 from .tasks import TERMINAL, Task, TaskQueue
 from .tools import TOOL_SCHEMAS
@@ -173,9 +173,10 @@ class Agent:
             return None
         return rows[0]["id"]
 
-    def _collab_prefs(self, user_id: str, provider: str, model_label: str, ref: str) -> list:
+    def _collab_prefs(self, user_id: str, project_id: str, provider: str, model_label: str, ref: str) -> list:
         items = [i for i in self.ci.memory.current(user_id)
-                 if i.pinned and i.trust.rank >= Trust.USER_STATED.rank and i.kind == "preference"]
+                 if i.pinned and i.trust.rank >= Trust.USER_STATED.rank and i.kind == "preference"
+                 and in_scope(i, project_id)]
         return self.ci.egress.filter(user_id, items, vendor_of(provider), model_label, ref=ref).allowed if items else []
 
     # Events after which context already sent in a session may no longer be allowed.
@@ -196,7 +197,7 @@ class Agent:
             self.close_session(user_id, project_id, prev)
         sid, now = new_id("ses"), utcnow().isoformat()
         ad = self.adapter(provider, model)
-        prefs = self._collab_prefs(user_id, provider, ad.model, ref=sid)
+        prefs = self._collab_prefs(user_id, project_id, provider, ad.model, ref=sid)
         system = SYSTEM + (("\n\nHow this person has asked you to work with them:\n" +
                             "\n".join(f"- {_clean(p.content)}" for p in prefs)) if prefs else "")
         st = {"provider": provider, "model": model, "system": system, "messages": [], "pending": None,
@@ -248,7 +249,8 @@ class Agent:
                                   briefing_claims=[c["id"] for c in b.get("claims", [])],
                                   briefing_withheld=b.get("withheld", []),
                                   system_memory_items=st.get("system_memory_items", []))
-            cx = self.ci.select_context(user_id, text, provider, ad.model, self.ci.budget_tokens, ref=sid)
+            cx = self.ci.select_context(user_id, text, provider, ad.model, self.ci.budget_tokens, ref=sid,
+                                        project_id=project_id)
             # Pinned collaboration preferences already sit in the system section; every other
             # selected item, pinned or not, goes in the fenced data block.
             notes = cx.memories + [i for i in cx.profile if i.kind != "preference"]
@@ -264,7 +266,8 @@ class Agent:
                 last["content"] = prior + [{"type": "text", "text": content}]
             else:
                 st["messages"].append({"role": "user", "content": content})
-            disclosure.update(memory_items=[i.id for i in notes], memory_withheld=[list(x) for x in cx.decision.blocked])
+            disclosure.update(memory_items=[i.id for i in notes], memory_withheld=[list(x) for x in cx.decision.blocked],
+                              selection=cx.explain, out_of_scope=cx.out_of_scope)
             st.setdefault("disclosures", []).append(disclosure)
             self.audit.append(user_id, "session.disclosure", project=project_id, session=sid, provider=provider,
                               vendor=vendor, briefing_sha256=disclosure["briefing_sha256"],

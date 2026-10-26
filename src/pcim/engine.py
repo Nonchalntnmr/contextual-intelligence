@@ -46,7 +46,7 @@ from .sovereignty.consent import ConsentLedger
 from .sovereignty.crypto import KeyRing
 from .sovereignty.egress import CONFIRMED_FLAG, INSTRUCTION_FLAG, EgressGuard
 from .store import Store
-from .types import TASK_TYPES, Sensitivity, Trust, new_id, utcnow
+from .types import KINDS, TASK_TYPES, Sensitivity, Trust, new_id, utcnow
 
 ASSIST_STATE = "pcim-assist"
 
@@ -69,6 +69,17 @@ class ContextSelection:
     n_candidates: int
     profile: list
     memories: list
+    explain: list = dataclasses.field(default_factory=list)  # per candidate: ids and numbers, no content
+    out_of_scope: int = 0  # current items scoped to another project, never candidates here
+
+
+SCOPE_PREFIX = "project:"
+
+
+def in_scope(item, project_id: str | None) -> bool:
+    """An item tagged `project:<id>` belongs to that project only; an untagged item is user-wide."""
+    scopes = [t[len(SCOPE_PREFIX):] for t in item.tags if t.startswith(SCOPE_PREFIX)]
+    return not scopes or project_id in scopes
 
 
 def _hash_token(token: str) -> str:
@@ -150,7 +161,8 @@ class PersonalCI:
         return self.memory.remember(user_id, content, kind, **kw)
 
     def ingest_text(self, user_id: str, text: str, source: str, title: str | None = None,
-                    sensitivity: Sensitivity = Sensitivity.PERSONAL, kind: str = "fact") -> list:
+                    sensitivity: Sensitivity = Sensitivity.PERSONAL, kind: str = "fact",
+                    tags: tuple[str, ...] = ()) -> list:
         """Split a document into paragraph items. Documents are UNTRUSTED: they can carry
         injected instructions, so they are stored as data and can never become standing
         preferences without the person's confirmation."""
@@ -159,7 +171,7 @@ class PersonalCI:
         for n, p in enumerate(paras):
             out.append(self.memory.remember(
                 user_id, p, kind, source=source, trust=Trust.UNTRUSTED, sensitivity=sensitivity,
-                confidence=0.7, provenance={"title": title or "", "paragraph": n},
+                confidence=0.7, provenance={"title": title or "", "paragraph": n}, tags=tags,
             ))
         return out
 
@@ -196,14 +208,18 @@ class PersonalCI:
         self.audit.append(user_id, "assist.growth_goals", task_types=sorted(task_types))
 
     def select_context(self, user_id: str, task: str, provider: str, model_label: str, budget: int,
-                       ref: str) -> "ContextSelection":
-        """C → B → egress → D: what this provider may see, and what the policy chose from it."""
+                       ref: str, project_id: str | None = None) -> "ContextSelection":
+        """C → scope → B → egress → D: what this provider may see, and what the policy chose from it.
+
+        Memory scoped to a project is a candidate only for that project; with no project
+        (a one-shot ask, an MCP request without one) only user-wide memory is."""
         if self.store.get_user(user_id) is None:
             raise KeyError(f"unknown user {user_id}")
         now = utcnow()
         probs = classify_task(task)
         p_vec = np.array([probs[t] for t in TASK_TYPES])
-        current = self.memory.current(user_id, now)
+        everything = self.memory.current(user_id, now)
+        current = [i for i in everything if in_scope(i, project_id)]
         ids, mat = self.memory.embeddings(user_id)
         emb = {i: mat[j] for j, i in enumerate(ids)} if mat is not None else {}
         by_id = {i.id: i for i in current}
@@ -224,10 +240,17 @@ class PersonalCI:
                 confirmed_instructions=INSTRUCTION_FLAG in i.flags and CONFIRMED_FLAG in i.flags,
             )
         trusted = lambda i: i.pinned and i.trust.rank >= Trust.USER_STATED.rank  # noqa: E731
+        picked = {int(j) for j in sel.idx}
+        explain = [{"id": cs.ids[j], "selected": j in picked, "kind": KINDS[int(cs.kind[j])],
+                    "pinned": bool(cs.pinned[j]), "similarity": round(float(cs.sim[j]), 3),
+                    "age_days": round(float(cs.age_days[j]), 1), "confidence": round(float(cs.confidence[j]), 2),
+                    "tokens": int(cs.tokens[j]), "score": round(float(sel.scores[j]), 4)} for j in range(len(cs))]
+        explain.sort(key=lambda e: (not e["selected"], -e["score"]))
         return ContextSelection(
             probs=probs, task_type=max(probs, key=probs.get), chosen=chosen, sel=sel, policy=pol,
             decision=decision, n_candidates=len(cs),
             profile=[pitem(i) for i in chosen if trusted(i)], memories=[pitem(i) for i in chosen if not trusted(i)],
+            explain=explain, out_of_scope=len(everything) - len(current),
         )
 
     def ask(self, user_id: str, task: str, provider: str = "mock", model: str | None = None,
@@ -260,6 +283,8 @@ class PersonalCI:
                      for i in chosen],
             "withheld_by_egress": [{"id": i, "reason": r} for i, r in decision.blocked],
             "candidates_considered": cs_len,
+            "selection": cx.explain,
+            "out_of_scope": cx.out_of_scope,
             "context_tokens": int(sum(i.tokens for i in chosen)),
             "budget": budget, "policy": pol.name, "policy_version": pol.version,
             "usage": dataclasses.asdict(resp.usage), "cost_usd": resp.cost_usd, "latency_ms": round(resp.latency_ms, 1),

@@ -32,7 +32,7 @@ import json
 import subprocess
 from pathlib import Path
 
-from .engine import PersonalCI
+from .engine import SCOPE_PREFIX, PersonalCI
 from .registry import VENDORS, vendor_of
 from .types import new_id, utcnow
 
@@ -204,8 +204,16 @@ class Workspace:
         raise KeyError(note_id)
 
     def delete_project(self, user_id: str, project_id: str) -> dict:
+        """Destroys the project key (transcripts, tasks, claims, exchange records) and deletes the
+        memory scoped to this project, with everything derived from it. User-wide memory stays."""
         row = self._row(user_id, project_id)
+        tag = f"{SCOPE_PREFIX}{project_id}"
+        doomed = []
+        for item in self.ci.memory.all(user_id):
+            if tag in item.tags and item.id not in doomed and self.store.get_item(item.id) is not None:
+                doomed += self.ci.memory.delete(user_id, item.id, cascade=True)
         counts = self.store.delete_project_rows(project_id, row["key_id"])
+        counts["memory_items"] = len(doomed)
         self.audit.append(user_id, "project.delete", project=project_id, **{k: int(v) for k, v in counts.items()})
         return counts
 
