@@ -205,6 +205,29 @@ def test_the_memory_cache_never_serves_a_withdrawn_item(tmp_path):
     assert server.memory.current("u")[0].content != "mutated"  # callers get copies
 
 
+def test_greedy_propensities_equal_the_sampling_loop_they_replace():
+    import numpy as np
+    from pcim.policy.candidates import CandidateSet
+    from pcim.policy.features import featurize
+    from pcim.policy.learned import BayesLinearPolicy
+    from pcim.policy.prior import designed_prior
+    rng = np.random.default_rng(0)
+    pol = BayesLinearPolicy(designed_prior(), greedy=True, rank="density")
+    for _ in range(200):
+        n = int(rng.integers(1, 60))
+        emb = rng.normal(size=(n, 16))
+        emb /= np.linalg.norm(emb, axis=1, keepdims=True)
+        cs = CandidateSet([f"m{i}" for i in range(n)], rng.uniform(-0.2, 1, n), rng.integers(0, 6, n),
+                          rng.uniform(0, 900, n), rng.uniform(0.3, 1, n), rng.integers(5, 120, n), np.zeros(n, bool),
+                          rng.random(n) < 0.1, rng.integers(0, 3, n), emb)
+        p, budget = rng.dirichlet(np.ones(5)), int(rng.integers(50, 1500))
+        sel = pol.select(cs, p, budget, np.random.default_rng(1), propensity_samples=32)
+        F, beta, old = featurize(cs, p), pol.mean(), np.zeros(n)
+        for _ in range(32):  # what the loop computed before
+            old[pol._choose(beta, F, cs, budget)[0]] += 1
+        assert np.array_equal(sel.propensities, old / 32)
+
+
 def test_usage_is_accounted_per_turn_and_per_session(env):
     ci, ws, q, agent, p = env
     agent.set_adapter("mock", None, Scripted(lambda n, m: step(calls=notes(n, 1), inp=100) if n % 2 else step("ok", inp=50)))

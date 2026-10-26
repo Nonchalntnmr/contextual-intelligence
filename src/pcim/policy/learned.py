@@ -250,11 +250,17 @@ class BayesLinearPolicy:
         idx, s = self._choose(beta, F, cs, budget)
         props = None
         if propensity_samples and len(cs):
-            counts = np.zeros(len(cs))
-            for _ in range(propensity_samples):
-                b = self.sample(rng) if explore else beta
-                counts[self._choose(b, F, cs, budget)[0]] += 1
-            props = counts / propensity_samples
+            if not explore:
+                # Acting on a fixed beta is deterministic: every sample would repeat the same
+                # choice, so P(included) is exactly the indicator (and no randomness is used,
+                # as in the sampling loop). This was ~10 ms per request in production.
+                props = np.zeros(len(cs))
+                props[idx] = 1.0
+            else:
+                counts = np.zeros(len(cs))
+                for _ in range(propensity_samples):
+                    counts[self._choose(self.sample(rng), F, cs, budget)[0]] += 1
+                props = counts / propensity_samples
         x = regression_vector(F, idx, task_probs)
         return Selection(idx=idx, scores=s, propensities=props, x=x, policy=self.name, version=self.version)
 
