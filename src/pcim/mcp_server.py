@@ -32,6 +32,8 @@ from .registry import vendor_of
 from .types import KINDS, Trust, new_id, utcnow
 from .workspace import NOTE_KINDS, ProviderAccessDenied, Workspace, render_briefing
 
+MAX_TEXT = 50_000  # the same ceiling the HTTP API puts on a task
+
 INSTRUCTIONS = (
     "Personal CI holds this person's own context: their projects, goals, preferences, constraints and notes. "
     "At the start of work that depends on who they are or what they are working on, call ci_project_briefing "
@@ -73,6 +75,8 @@ def build_server(ci: PersonalCI, user_id: str, provider: str = "anthropic") -> M
         Returns an interaction id; pass it to ci_report_outcome when the task is done so CI can learn
         which context helped.
         """
+        if not 0 < len(task) <= MAX_TEXT:
+            return f"error: task must be 1 to {MAX_TEXT} characters"
         if project_id is not None:
             try:
                 ws.require_provider(user_id, project_id, provider, purpose="mcp-context")
@@ -104,6 +108,8 @@ def build_server(ci: PersonalCI, user_id: str, provider: str = "anthropic") -> M
         agent-imported and needs their confirmation before it can act as a preference, goal or constraint."""
         if kind not in KINDS:
             return f"error: kind must be one of {KINDS}"
+        if not 0 < len(content) <= 20_000:
+            return "error: content must be 1 to 20000 characters"
         tags = ()
         if project_id is not None:
             try:

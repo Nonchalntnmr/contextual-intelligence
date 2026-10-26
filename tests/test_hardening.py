@@ -178,6 +178,38 @@ def test_the_disclosure_survives_a_failed_model_call(tmp_path):
     assert len(d) == 1 and d[0]["briefing_sha256"]
 
 
+def test_a_catastrophic_regex_is_stopped_not_left_running(tmp_path, repo):
+    import time
+    from pcim.governor import Governor
+    from pcim.tasks import TaskQueue
+    from pcim.tools import Executor
+    ci, ws, *_ = make(tmp_path)
+    p = ws.create_project("u", "P")
+    (repo / "big.txt").write_text("a" * 3000 + "\n")
+    ws.authorize_workspace("u", p.id, str(repo))
+    q = TaskQueue(ws, Governor(ws), executor=Executor(search_timeout_s=1.0))
+    t0 = time.monotonic()
+    t = q.propose("u", p.id, "search_code", {"pattern": "(a+)+b", "glob": "**/*"})  # exponential backtracking
+    assert t.status == "failed" and "longer than 1s" in t.reason and time.monotonic() - t0 < 10
+    ok = q.propose("u", p.id, "search_code", {"pattern": "alpha", "glob": "**/*"})
+    assert ok.status == "succeeded" and ok.result["matches"] == ["a.txt:1: alpha"]
+
+
+def test_mcp_refuses_oversized_input(tmp_path):
+    mcp = pytest.importorskip("mcp")
+    from pcim.mcp_server import build_server
+    ci, ws, *_ = make(tmp_path, providers=("anthropic",))
+    ci.consent("u", "agent:mcp", "store")
+    srv = build_server(ci, "u", provider="anthropic")
+
+    async def go(name, args):
+        async with mcp.Client(srv) as c:
+            return (await c.call_tool(name, args)).content[0].text
+    assert asyncio.run(go("ci_remember", {"content": "x" * 20_001})).startswith("error:")
+    assert asyncio.run(go("ci_personal_context", {"task": "x" * 50_001})).startswith("error:")
+    assert ci.memory.current("u") == []
+
+
 def test_a_test_run_older_than_the_last_change_cannot_settle_a_claim(tmp_path, repo):
     _, ws, ledger, q, _, gw = make(tmp_path)
     p = ws.create_project("u", "P")
