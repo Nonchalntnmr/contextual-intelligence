@@ -1,0 +1,5 @@
+{
+ "experiments/e1/dataset.json": "a66c224422d6fc24ed43013870b97c93a38a6699a7e7b598a552e704877e4ec4",
+ "experiments/e1/PREREGISTRATION.md": "69c1c175f9074d79672330537cb9544d0b4b851354cc0f8d1bb427eca7ba572b",
+ "src/pcim/observatory/e1.py": "2dd04a7d50576dfc4052cb75e9a53125449d69358fc4ec4ab0cae69c197b7dee"
+}
