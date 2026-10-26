@@ -19,6 +19,7 @@ as data. The guard decides what the provider may *see*.
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 
 from ..store import Store
 from ..types import MemoryItem, Sensitivity, utcnow
@@ -69,7 +70,7 @@ class EgressGuard:
             frontier, depth = nxt, depth + 1
         return sources, sens, intact
 
-    def check(self, user_id: str, item: MemoryItem, provider: str) -> tuple[bool, str]:
+    def check(self, user_id: str, item: MemoryItem, provider: str, grants=None) -> tuple[bool, str]:
         now = utcnow()
         if item.sensitivity is Sensitivity.SECRET:
             return False, "secret"
@@ -83,7 +84,7 @@ class EgressGuard:
         if sens is Sensitivity.SECRET:
             return False, "secret-ancestor"
         for src in sorted(sources):
-            ok, reason = self.ledger.allows(user_id, src, "egress", provider, sens, now)
+            ok, reason = self.ledger.allows(user_id, src, "egress", provider, sens, now, grants=grants)
             if not ok:
                 return False, f"{reason}:{src}"
         return True, "ok"
@@ -92,20 +93,27 @@ class EgressGuard:
         self, user_id: str, items: list[MemoryItem], provider: str, model: str, ref: str
     ) -> EgressDecision:
         allowed, blocked = [], []
+        grants = self.ledger.grants(user_id)  # one snapshot of the ledger for the whole decision
         for it in items:
-            ok, reason = self.check(user_id, it, provider)
+            ok, reason = self.check(user_id, it, provider, grants=grants)
             if ok:
                 allowed.append(it)
             else:
                 blocked.append((it.id, reason))
+        # The permitted set is recorded as a count and a hash of its sorted ids, which is
+        # verifiable against the store and does not grow the log with the size of memory.
+        # What was actually sent is itemized in the receipt or session disclosure. Refusals
+        # are itemized here (up to 200; the count is always exact).
         h = self.audit.append(
             user_id,
             "egress",
             ref=ref,
             provider=provider,
             model=model,
-            allowed=[i.id for i in allowed],
-            blocked=[[i, r[:120]] for i, r in blocked],
+            allowed_n=len(allowed),
+            allowed_sha256=hashlib.sha256(",".join(sorted(i.id for i in allowed)).encode()).hexdigest(),
+            blocked=[[i, r[:120]] for i, r in blocked[:200]],
+            blocked_n=len(blocked),
             tokens=sum(i.tokens for i in allowed),
         )
         return EgressDecision(allowed, blocked, h)

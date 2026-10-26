@@ -12,10 +12,12 @@ make sure a call, once allowed, cannot do more than it says:
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 import signal
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -110,11 +112,44 @@ def _sha(b: bytes) -> str:
     return hashlib.sha256(b).hexdigest()
 
 
+def _search(root: Path, pattern: str, glob: str) -> dict:
+    rx = re.compile(pattern)
+    matches = []
+    for p, rel in _iter_files(root, glob):
+        if p.stat().st_size > 1_000_000:
+            continue
+        try:
+            text = p.read_text(errors="strict")
+        except (UnicodeDecodeError, OSError):
+            continue
+        for n, line in enumerate(text.splitlines(), 1):
+            if rx.search(line[:2000]):
+                matches.append(f"{rel}:{n}: {line.strip()[:300]}")
+                if len(matches) >= MAX_MATCHES:
+                    return {"matches": matches, "truncated": True}
+    return {"matches": matches, "truncated": False}
+
+
+def _search_in_child(root: Path, pattern: str, glob: str, timeout_s: float) -> dict:
+    """The model writes the regex, and Python's re has no timeout: a pattern like (a+)+$ can
+    backtrack for hours. The search runs in a child process that is killed at the deadline."""
+    try:
+        r = subprocess.run([sys.executable, "-m", "pcim.tools"], input=json.dumps(
+            {"root": str(root), "pattern": pattern, "glob": glob}), capture_output=True, text=True,
+            timeout=timeout_s, env=scrubbed_env())
+    except subprocess.TimeoutExpired:
+        raise ToolError(f"search took longer than {timeout_s:g}s and was stopped; simplify the pattern")
+    if r.returncode != 0:
+        raise ToolError(f"search failed: {r.stderr.strip()[-300:]}")
+    return json.loads(r.stdout)
+
+
 class Executor:
-    def __init__(self):
+    def __init__(self, search_timeout_s: float = 10.0):
         self._procs: dict[str, subprocess.Popen] = {}
         self._cancelled: set[str] = set()
         self._lock = threading.Lock()
+        self.search_timeout_s = search_timeout_s
 
     def cancel(self, task_id: str) -> bool:
         with self._lock:
@@ -153,23 +188,10 @@ class Executor:
             if len(args["pattern"]) > 200:
                 raise ToolError("pattern too long")
             try:
-                rx = re.compile(args["pattern"])
+                re.compile(args["pattern"])
             except re.error as e:
                 raise ToolError(f"bad regex: {e}")
-            matches = []
-            for p, rel in _iter_files(root, args.get("glob") or "**/*"):
-                if p.stat().st_size > 1_000_000:
-                    continue
-                try:
-                    text = p.read_text(errors="strict")
-                except (UnicodeDecodeError, OSError):
-                    continue
-                for n, line in enumerate(text.splitlines(), 1):
-                    if rx.search(line):
-                        matches.append(f"{rel}:{n}: {line.strip()[:300]}")
-                        if len(matches) >= MAX_MATCHES:
-                            return {"matches": matches, "truncated": True}
-            return {"matches": matches, "truncated": False}
+            return _search_in_child(root, args["pattern"], args.get("glob") or "**/*", self.search_timeout_s)
         if tool == "git_status":
             # A folder with no repository of its own makes git walk up to an enclosing one. On a
             # machine where $HOME is itself a repository that would mean listing (and leaking)
@@ -225,3 +247,8 @@ class Executor:
             return {"argv": argv, "exit_code": proc.returncode, "timed_out": timed_out,
                     "duration_s": round(time.time() - t0, 2), "stdout_tail": out[-6000:], "stderr_tail": err[-3000:]}
         raise ToolError(f"{tool} is not executed by the executor")
+
+
+if __name__ == "__main__":  # the search child (see _search_in_child)
+    req = json.load(sys.stdin)
+    json.dump(_search(Path(req["root"]), req["pattern"], req["glob"]), sys.stdout)

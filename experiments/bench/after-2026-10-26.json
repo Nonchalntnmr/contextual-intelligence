@@ -1,0 +1,167 @@
+{
+  "ran_at": "2026-10-26T02:11:45-0400",
+  "reps": 20,
+  "sizes": {
+    "100": {
+      "setup_seconds": 0.04,
+      "select_context": {
+        "median_ms": 0.885,
+        "p95_ms": 0.985
+      },
+      "select_context_stages": {
+        "memory_current": {
+          "median_ms": 0.082,
+          "p95_ms": 0.087
+        },
+        "embeddings": {
+          "median_ms": 0.002,
+          "p95_ms": 0.003
+        },
+        "egress_filter": {
+          "median_ms": 0.164,
+          "p95_ms": 0.179
+        },
+        "candidates": {
+          "median_ms": 0.091,
+          "p95_ms": 0.099
+        },
+        "policy_select": {
+          "median_ms": 0.328,
+          "p95_ms": 0.342
+        }
+      },
+      "select_context_peak_kib": 378.2,
+      "agent_first_turn": {
+        "median_ms": 2.684,
+        "p95_ms": 2.76
+      },
+      "first_turn_prompt_tokens": 2824,
+      "agent_followup_turn": {
+        "median_ms": 2.643,
+        "p95_ms": 3.759
+      },
+      "per_followup_turn": {
+        "sql_statements": 25,
+        "record_decryptions": 5
+      },
+      "tool_read_file": {
+        "median_ms": 0.414,
+        "p95_ms": 0.901
+      },
+      "briefing_build_and_render": {
+        "median_ms": 1.36,
+        "p95_ms": 1.473
+      }
+    },
+    "1000": {
+      "setup_seconds": 0.22,
+      "select_context": {
+        "median_ms": 3.041,
+        "p95_ms": 4.635
+      },
+      "select_context_stages": {
+        "memory_current": {
+          "median_ms": 0.699,
+          "p95_ms": 1.019
+        },
+        "embeddings": {
+          "median_ms": 0.003,
+          "p95_ms": 0.003
+        },
+        "egress_filter": {
+          "median_ms": 1.132,
+          "p95_ms": 1.177
+        },
+        "candidates": {
+          "median_ms": 0.437,
+          "p95_ms": 0.462
+        },
+        "policy_select": {
+          "median_ms": 0.353,
+          "p95_ms": 0.362
+        }
+      },
+      "select_context_peak_kib": 2677.3,
+      "agent_first_turn": {
+        "median_ms": 5.847,
+        "p95_ms": 5.89
+      },
+      "first_turn_prompt_tokens": 2862,
+      "agent_followup_turn": {
+        "median_ms": 5.059,
+        "p95_ms": 6.063
+      },
+      "per_followup_turn": {
+        "sql_statements": 25,
+        "record_decryptions": 5
+      },
+      "tool_read_file": {
+        "median_ms": 0.404,
+        "p95_ms": 0.454
+      },
+      "briefing_build_and_render": {
+        "median_ms": 1.4,
+        "p95_ms": 1.451
+      }
+    },
+    "3000": {
+      "setup_seconds": 0.67,
+      "select_context": {
+        "median_ms": 7.919,
+        "p95_ms": 10.391
+      },
+      "select_context_stages": {
+        "memory_current": {
+          "median_ms": 2.152,
+          "p95_ms": 2.714
+        },
+        "embeddings": {
+          "median_ms": 0.003,
+          "p95_ms": 0.008
+        },
+        "egress_filter": {
+          "median_ms": 3.402,
+          "p95_ms": 3.455
+        },
+        "candidates": {
+          "median_ms": 1.249,
+          "p95_ms": 1.339
+        },
+        "policy_select": {
+          "median_ms": 0.379,
+          "p95_ms": 0.395
+        }
+      },
+      "select_context_peak_kib": 8037.4,
+      "agent_first_turn": {
+        "median_ms": 12.204,
+        "p95_ms": 12.8
+      },
+      "first_turn_prompt_tokens": 2849,
+      "agent_followup_turn": {
+        "median_ms": 9.995,
+        "p95_ms": 12.418
+      },
+      "per_followup_turn": {
+        "sql_statements": 25,
+        "record_decryptions": 5
+      },
+      "tool_read_file": {
+        "median_ms": 0.405,
+        "p95_ms": 0.816
+      },
+      "briefing_build_and_render": {
+        "median_ms": 1.399,
+        "p95_ms": 1.434
+      }
+    }
+  },
+  "concurrency": {
+    "threads": 8,
+    "turns_each": 10,
+    "seconds": 0.19,
+    "turns_per_second": 422.1,
+    "errors": [],
+    "n_errors": 0
+  }
+}

@@ -16,12 +16,15 @@ from __future__ import annotations
 
 import dataclasses
 import datetime as dt
+import logging
 import time
 
 from .governor import RISK, Governor
 from .tools import Cancelled, Executor, ToolError, validate_args
 from .types import new_id, utcnow
 from .workspace import Workspace
+
+log = logging.getLogger(__name__)
 
 LIVE = ("awaiting_approval", "approved", "running")
 TERMINAL = ("succeeded", "failed", "cancelled", "denied", "interrupted", "expired")
@@ -110,6 +113,12 @@ class TaskQueue:
     # ------------------------------------------------------------------ lifecycle
     def propose(self, user_id: str, project_id: str, tool: str, args: dict, requested_by: str = "model",
                 session_id: str | None = None, tool_use_id: str | None = None) -> Task:
+        if session_id and tool_use_id:  # the same model call proposed twice is one task, never a second side effect
+            dup = self.store.query("SELECT id FROM tasks WHERE session_id=? AND tool_use_id=? AND user_id=?",
+                                   (session_id, tool_use_id, user_id))
+            if dup:
+                self.audit.append(user_id, "task.duplicate", task=dup[0]["id"], project=project_id)
+                return self.get(user_id, dup[0]["id"])
         tid, now = new_id("task"), utcnow().isoformat()
         try:
             validate_args(tool, args)
@@ -203,13 +212,14 @@ class TaskQueue:
         try:
             if t.tool == "record_note":
                 note = self.ws.add_note(user_id, t.project_id, t.args["kind"], t.args["text"], source="model",
-                                        by=self._author(t))
+                                        by=self._author(t), lineage=self.exposure(user_id, t))
                 result = {"note_id": note["id"]}
             elif t.tool == "record_claim":
                 if self.claims is None:
                     raise ToolError("the claim ledger is not enabled here")
                 c = self.claims.add(user_id, t.project_id, t.args["statement"], t.args["evidence"],
-                                    t.args["uncertainty"], author={"kind": "model", **self._author(t)})
+                                    t.args["uncertainty"], author={"kind": "model", **self._author(t)},
+                                    lineage=self.exposure(user_id, t))
                 result = {"claim_id": c["id"], "status": c["status"], "evidence_refs": c["evidence_refs"]}
             else:
                 spec = self.ws.workspace_auth(user_id, t.project_id)["spec"]
@@ -221,6 +231,9 @@ class TaskQueue:
             status, reason, result = "cancelled", str(e), None
         except (ToolError, OSError, ValueError) as e:
             status, reason, result = "failed", str(e)[:500], None
+        except Exception as e:  # a bug, not a tool outcome: logged, and the task fails visibly instead of hanging in "running"
+            log.exception("task %s (%s) raised", task_id, t.tool)
+            status, reason, result = "failed", f"internal error ({type(e).__name__})", None
         ms = (time.perf_counter() - t0) * 1000
         self._set(task_id, status=status, reason=reason, finished_at=utcnow().isoformat(), duration_ms=ms,
                   result_ct=self._seal(user_id, t.project_id, result, task_id, "result") if result is not None else None)
@@ -232,6 +245,20 @@ class TaskQueue:
             return {}
         rows = self.store.query("SELECT provider, model FROM sessions WHERE id=?", (t.session_id,))
         return {"provider": rows[0]["provider"], "model": rows[0]["model"], "session": t.session_id} if rows else {}
+
+    def exposure(self, user_id: str, t: Task) -> list[str]:
+        """Memory items the model behind this task had been shown in its session so far:
+        what anything it writes may be derived from."""
+        if not t.session_id:
+            return []
+        rows = self.store.query("SELECT state_ct FROM sessions WHERE id=? AND user_id=?", (t.session_id, user_id))
+        if not rows:
+            return []
+        st = self.store.open_json(self._key(user_id, t.project_id), rows[0]["state_ct"], t.session_id)
+        ids = list(st.get("system_memory_items", []))
+        for d in st.get("disclosures", []):
+            ids += d.get("memory_items", [])
+        return list(dict.fromkeys(ids))
 
     def undo(self, user_id: str, task_id: str) -> dict:
         """Restore the file a write_file task replaced (or remove the one it created)."""
@@ -247,7 +274,7 @@ class TaskQueue:
             p.unlink(missing_ok=True)
         else:
             p.write_text(t.result["backup"])
-        res = dict(t.result, undone=True)
+        res = dict(t.result, undone=True, undone_at=utcnow().isoformat())
         self._set(task_id, result_ct=self._seal(user_id, t.project_id, res, task_id, "result"))
         self.audit.append(user_id, "task.undo", task=task_id)
         return {"undone": True, "path": t.args["path"]}

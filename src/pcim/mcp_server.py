@@ -26,10 +26,13 @@ from pathlib import Path
 from mcp.server.mcpserver import MCPServer
 
 from .adapters.render import _clean, _label
-from .engine import PersonalCI
+from .engine import SCOPE_PREFIX, PersonalCI
 from .memory import ConsentRequired
+from .registry import vendor_of
 from .types import KINDS, Trust, new_id, utcnow
 from .workspace import NOTE_KINDS, ProviderAccessDenied, Workspace, render_briefing
+
+MAX_TEXT = 50_000  # the same ceiling the HTTP API puts on a task
 
 INSTRUCTIONS = (
     "Personal CI holds this person's own context: their projects, goals, preferences, constraints and notes. "
@@ -44,11 +47,13 @@ def build_server(ci: PersonalCI, user_id: str, provider: str = "anthropic") -> M
     ws = Workspace(ci)
     server = MCPServer("personal-ci", instructions=INSTRUCTIONS, version="0.1.0")
 
+    vendor = vendor_of(provider)
+
     @server.tool()
     def ci_list_projects() -> list[dict]:
-        """List this person's projects with their objectives."""
+        """List this person's projects (those this agent's provider may see) with their objectives."""
         return [{"id": p.id, "name": p.name, "objective": p.objective, "updated_at": p.updated_at}
-                for p in ws.list_projects(user_id)]
+                for p in ws.list_projects(user_id) if vendor in ws.provider_vendors(user_id, p.id)]
 
     @server.tool()
     def ci_project_briefing(project_id: str) -> str:
@@ -58,19 +63,28 @@ def build_server(ci: PersonalCI, user_id: str, provider: str = "anthropic") -> M
         except ProviderAccessDenied as e:
             return f"error: {e}. The person can allow it in the project's model access settings."
         nonce = secrets.token_hex(6)
-        body = render_briefing(ws.briefing(user_id, project_id))
+        body = render_briefing(ws.briefing(user_id, project_id, vendor=vendor))
         ci.audit.append(user_id, "mcp.briefing", project=project_id, provider=provider)
         return f'<project_briefing nonce="{nonce}">\n{body}\n</project_briefing nonce="{nonce}">'
 
     @server.tool()
-    def ci_personal_context(task: str, budget_tokens: int = 1200) -> str:
+    def ci_personal_context(task: str, budget_tokens: int = 1200, project_id: str | None = None) -> str:
         """Notes about this person relevant to `task`, filtered by their consent for this provider.
+        Pass project_id to include memory kept for that project.
 
         Returns an interaction id; pass it to ci_report_outcome when the task is done so CI can learn
         which context helped.
         """
+        if not 0 < len(task) <= MAX_TEXT:
+            return f"error: task must be 1 to {MAX_TEXT} characters"
+        if project_id is not None:
+            try:
+                ws.require_provider(user_id, project_id, provider, purpose="mcp-context")
+            except (ProviderAccessDenied, KeyError) as e:
+                return f"error: {e}"
         iid = new_id("int")
-        cx = ci.select_context(user_id, task, provider, "mcp-client", max(100, min(budget_tokens, 8000)), ref=iid)
+        cx = ci.select_context(user_id, task, provider, "mcp-client", max(100, min(budget_tokens, 8000)), ref=iid,
+                               project_id=project_id)
         items = cx.profile + cx.memories
         ci.store.insert_interaction(
             {"id": iid, "user_id": user_id, "ts": utcnow().isoformat(), "task_type": cx.task_type,
@@ -89,13 +103,23 @@ def build_server(ci: PersonalCI, user_id: str, provider: str = "anthropic") -> M
                 f'<personal_context nonce="{nonce}">\n{body}\n</personal_context nonce="{nonce}">')
 
     @server.tool()
-    def ci_remember(content: str, kind: str = "fact") -> str:
-        """Store something about this person. It is stored as agent-imported and needs their confirmation
-        before it can act as a preference, goal or constraint."""
+    def ci_remember(content: str, kind: str = "fact", project_id: str | None = None) -> str:
+        """Store something about this person (for one project, if project_id is given). It is stored as
+        agent-imported and needs their confirmation before it can act as a preference, goal or constraint."""
         if kind not in KINDS:
             return f"error: kind must be one of {KINDS}"
+        if not 0 < len(content) <= 20_000:
+            return "error: content must be 1 to 20000 characters"
+        tags = ()
+        if project_id is not None:
+            try:
+                ws.require_provider(user_id, project_id, provider, purpose="mcp-remember")
+            except (ProviderAccessDenied, KeyError) as e:
+                return f"error: {e}"
+            tags = (f"{SCOPE_PREFIX}{project_id}",)
         try:
-            r = ci.memory.remember(user_id, content, kind, source="agent:mcp", trust=Trust.IMPORTED, confidence=0.8)
+            r = ci.memory.remember(user_id, content, kind, source="agent:mcp", trust=Trust.IMPORTED, confidence=0.8,
+                                   tags=tags)
         except ConsentRequired:
             return "error: not allowed yet. The person can enable it with: pcim consent grant agent:mcp store"
         note = f" (held as a fact until confirmed; proposed kind: {r.gated_from})" if r.gated_from else ""
@@ -106,7 +130,12 @@ def build_server(ci: PersonalCI, user_id: str, provider: str = "anthropic") -> M
         """Record an open_question, decision or next_step on a project. Shown to the person as model-written."""
         if kind not in NOTE_KINDS or kind == "summary":
             return "error: kind must be open_question, decision or next_step"
-        return "recorded " + ws.add_note(user_id, project_id, kind, text, source="model")["id"]
+        try:
+            ws.require_provider(user_id, project_id, provider, purpose="mcp-note")
+        except ProviderAccessDenied as e:
+            return f"error: {e}"
+        return "recorded " + ws.add_note(user_id, project_id, kind, text, source="model",
+                                         by={"provider": f"mcp:{provider}", "model": "an MCP client"})["id"]
 
     @server.tool()
     def ci_report_outcome(interaction_id: str, task_success: bool | None = None, rating: int | None = None) -> str:

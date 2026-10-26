@@ -35,8 +35,20 @@ PREAMBLE = (
 _FENCE = re.compile(r"</?\s*personal_context", re.IGNORECASE)
 
 
+# Where an item came from, in words a model will not mistake for each other: what the person
+# said or confirmed, what came from a connector, what CI inferred, what a document claimed.
+TRUST_WORDS = {
+    "user_confirmed": "the person confirmed this",
+    "user_stated": "the person said this",
+    "imported": "from a source the person connected",
+    "inferred": "inferred by CI, not verified",
+    "untrusted": "from a document, not verified",
+}
+
+
 def _label(i: PacketItem) -> str:
-    bits = [i.kind, i.trust.replace("_", "-"), f"since {i.valid_from[:10]}", f"confidence {i.confidence:.2f}"]
+    bits = [i.kind, TRUST_WORDS.get(i.trust, i.trust.replace("_", "-")), f"since {i.valid_from[:10]}",
+            f"confidence {i.confidence:.2f}"]
     if i.conflicted:
         bits.append("CONFLICTS with another note; unresolved")
     if i.confirmed_instructions:

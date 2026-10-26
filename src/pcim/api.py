@@ -23,7 +23,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from .adapters.base import ProviderError
-from .engine import PersonalCI
+from .engine import SCOPE_PREFIX, PersonalCI
 from .memory import ConsentRequired
 from .types import KINDS, Sensitivity
 
@@ -41,6 +41,7 @@ class MemoryIn(BaseModel):
     value: str | int | float | bool | None = None
     sensitivity: Sensitivity = Sensitivity.PERSONAL
     pinned: bool = False
+    project_id: str | None = None  # scope to one project; None = user-wide
 
 
 class CorrectIn(BaseModel):
@@ -53,6 +54,7 @@ class IngestIn(BaseModel):
     source: str = Field(pattern=r"^ingest:[A-Za-z0-9_./-]+$")
     title: str | None = None
     sensitivity: Sensitivity = Sensitivity.PERSONAL
+    project_id: str | None = None
 
 
 class ConsentIn(BaseModel):
@@ -203,12 +205,18 @@ def create_app(ci: PersonalCI) -> FastAPI:
         items = ci.memory.all(uid) if history else ci.memory.current(uid)
         return [_item_out(i) for i in items]
 
+    def scope_tags(uid: str, project_id: str | None) -> tuple[str, ...]:
+        if project_id is None:
+            return ()
+        owned(ws.get_project, uid, project_id)  # 404 for a project that is not this user's
+        return (f"{SCOPE_PREFIX}{project_id}",)
+
     @app.post("/v1/memory")
     def remember(body: MemoryIn, uid: str = Depends(user)):
         if body.kind not in KINDS:
             raise HTTPException(422, f"kind must be one of {KINDS}")
         r = ci.remember(uid, body.content, body.kind, key=body.key, value=body.value,
-                        sensitivity=body.sensitivity, pinned=body.pinned)
+                        sensitivity=body.sensitivity, pinned=body.pinned, tags=scope_tags(uid, body.project_id))
         return {"item": _item_out(r.item), "superseded": r.superseded, "conflicts": r.conflicts,
                 "gated_from": r.gated_from, "reaffirmed": r.reaffirmed}
 
@@ -247,7 +255,8 @@ def create_app(ci: PersonalCI) -> FastAPI:
     @app.post("/v1/ingest")
     def ingest(body: IngestIn, uid: str = Depends(user)):
         try:
-            rs = ci.ingest_text(uid, body.text, body.source, body.title, body.sensitivity)
+            rs = ci.ingest_text(uid, body.text, body.source, body.title, body.sensitivity,
+                                tags=scope_tags(uid, body.project_id))
         except ConsentRequired as e:
             raise HTTPException(403, str(e))
         return {"items": [_item_out(r.item) for r in rs],
@@ -333,7 +342,7 @@ def create_app(ci: PersonalCI) -> FastAPI:
     from .exchange import ClaimLedger, Gateway
     from .governor import Governor
     from .tasks import TaskQueue, TaskStateError
-    from .workspace import Workspace, WorkspaceError
+    from .workspace import Workspace, WorkspaceError, render_briefing
 
     ws = Workspace(ci)
     ledger = ClaimLedger(ws)
@@ -394,6 +403,23 @@ def create_app(ci: PersonalCI) -> FastAPI:
     @app.get("/v1/projects/{pid}/disclosures")
     def disclosures(pid: str, uid: str = Depends(user)):
         return guard(agent.disclosures, uid, pid)
+
+    @app.get("/v1/projects/{pid}/briefing")
+    def briefing_preview(pid: str, vendor: str, uid: str = Depends(user)):
+        """What a new session with `vendor` would be given, and what would be withheld and why."""
+        if vendor not in registry.VENDORS:
+            raise HTTPException(422, f"vendor must be one of {registry.VENDORS}")
+        b = guard(agent.briefing, uid, pid, vendor)
+        return {"vendor": vendor, "allowed": vendor in ws.provider_vendors(uid, pid), "text": render_briefing(b),
+                "withheld": b["withheld"]}
+
+    @app.post("/v1/projects/{pid}/notes/{nid}/release")
+    def release_note(pid: str, nid: str, uid: str = Depends(user)):
+        return guard(ws.release_note, uid, pid, nid)
+
+    @app.post("/v1/projects/{pid}/claims/{cid}/release")
+    def release_claim(pid: str, cid: str, uid: str = Depends(user)):
+        return guard(ledger.release, uid, pid, cid)
 
     @app.get("/v1/projects/{pid}/claims")
     def claims(pid: str, uid: str = Depends(user)):

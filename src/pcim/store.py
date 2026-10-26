@@ -21,6 +21,7 @@ wrapped key does not linger in free pages or the WAL file.
 
 from __future__ import annotations
 
+import copy
 import datetime as dt
 import json
 import os
@@ -269,6 +270,25 @@ class Store:
             self._db.execute("PRAGMA secure_delete=ON")
             self._db.executescript(_SCHEMA)
         self._dek_cache: dict[str, bytes] = {}
+        # Decrypted items per user. Cleared on every item write through this Store, and whenever
+        # SQLite's data_version shows another connection committed (a CLI next to the server),
+        # so a retracted or deleted item is never served from it.
+        self._items_cache: dict[str, list[MemoryItem]] = {}
+        self._own_writes = 0
+        self._data_version: int | None = None
+
+    def items_generation(self) -> tuple[int, int]:
+        """Changes whenever any item may have changed, here or in another process."""
+        with self._lock:
+            dv = self._db.execute("PRAGMA data_version").fetchone()[0]
+            if dv != self._data_version:
+                self._data_version = dv
+                self._items_cache.clear()
+            return dv, self._own_writes
+
+    def _items_changed(self) -> None:
+        self._own_writes += 1
+        self._items_cache.clear()
 
     def close(self) -> None:
         with self._lock:
@@ -373,6 +393,8 @@ class Store:
             except Exception:
                 self._db.execute("ROLLBACK")
                 raise
+            finally:
+                self._items_changed()
             self._flush_deleted()
             return counts
 
@@ -413,6 +435,8 @@ class Store:
             except Exception:
                 self._db.execute("ROLLBACK")
                 raise
+            finally:
+                self._items_changed()
 
     _META_FIELDS = {
         "valid_to", "superseded_at", "superseded_by", "status", "pinned", "confidence",
@@ -436,7 +460,10 @@ class Store:
             cols.append(f"{k}=?")
             vals.append(v)
         with self._lock:
-            self._db.execute(f"UPDATE items SET {', '.join(cols)} WHERE id=?", (*vals, item_id))
+            try:
+                self._db.execute(f"UPDATE items SET {', '.join(cols)} WHERE id=?", (*vals, item_id))
+            finally:
+                self._items_changed()
 
     def _row_to_item(self, row: sqlite3.Row) -> MemoryItem:
         payload = json.loads(unseal(self._dek(row["key_id"]), row["payload_ct"], row["id"]))
@@ -458,10 +485,14 @@ class Store:
 
     def list_items(self, user_id: str) -> list[MemoryItem]:
         with self._lock:
-            rows = self._db.execute(
-                "SELECT * FROM items WHERE user_id=? ORDER BY recorded_at", (user_id,)
-            ).fetchall()
-            return [self._row_to_item(r) for r in rows]
+            self.items_generation()  # drops the cache if another connection wrote
+            cached = self._items_cache.get(user_id)
+            if cached is None:
+                rows = self._db.execute(
+                    "SELECT * FROM items WHERE user_id=? ORDER BY recorded_at", (user_id,)
+                ).fetchall()
+                cached = self._items_cache[user_id] = [self._row_to_item(r) for r in rows]
+            return [copy.copy(i) for i in cached]  # callers may mutate their copies
 
     def item_embeddings(self, user_id: str) -> tuple[list[str], np.ndarray | None]:
         with self._lock:
@@ -501,6 +532,8 @@ class Store:
             except Exception:
                 self._db.execute("ROLLBACK")
                 raise
+            finally:
+                self._items_changed()
             self._flush_deleted()
             return True
 

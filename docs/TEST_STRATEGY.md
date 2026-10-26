@@ -18,8 +18,24 @@ A test double is never presented as a model. The mock agent prefixes every reply
 
 ## What each security property is tested by
 
-Every "controlled" row in `THREAT_MODEL.md` names its test. The ones added with the
-exchange work:
+Every "controlled" row in `CI_SECURITY_MODEL.md` names its test, and every fixed finding in
+`CI_ENGINEERING_AUDIT.md` names the test that fails without the fix. The test files, by
+concern:
+
+| file | concern |
+|---|---|
+| `test_runtime.py` | turn limits, durability, concurrency (the race test fails without the fix), idempotency, accounting, cache safety, equivalence of the propensity shortcut |
+| `test_isolation.py` | another user (33 endpoints), authentication on every route, project memory scope, the token at rest |
+| `test_hardening.py` | one test per finding of the independent review, plus the regex timeout and MCP input bounds |
+| `test_exchange_and_providers.py` | provider access, the gateway, the ledger, routing, both bridge adapters |
+| `test_milestone1_demo.py` | the sixteen steps over HTTP across a restart |
+| `test_e1_harness.py` | the evaluation's prompt-level guarantees, grader and statistics |
+
+A fifth layer sits beside these: **measurements.** `scripts/bench_runtime.py` records CI's
+own overhead, and `pcim.observatory.e1` the preregistered evaluation. Neither is a pass/fail
+test. Both are committed with their raw output, so a change can be compared against them.
+
+The tests added with the exchange work:
 
 - **Provider access is enforced before content leaves:**
   - `test_milestone1_sixteen_steps`, step 16: chat and verification both return 403, and no request reaches the provider's transport.
@@ -54,7 +70,7 @@ They say nothing about quality relative to a baseline (see below).
 
 - **Cross-vendor live exchange.** There are no OpenAI, Gemini or Anthropic API keys on this machine, so the OpenAI adapter is wire-tested only.
 - **Concurrency:** two browsers approving the same task, or a revocation racing a model step. The per-session lock covers the agent loop. Nothing covers the HTTP layer.
-- **An OS sandbox for `run_tests`.** There is none, so there is nothing to test (THREAT_MODEL, accepted risks).
+- **An OS sandbox for `run_tests`.** There is none, so there is nothing to test (CI_SECURITY_MODEL, accepted risks).
 - **The dashboard.** No browser tests. It only displays server decisions, and every rule it shows is enforced and tested server-side.
 - **Comparative evaluation.** Whether full CI beats a strong single-model assistant (arms A to D of the brief's §11) needs a pre-registered study with blinded grading and real tasks. `docs/RESEARCH.md` has the design (G1–G3). None of it has been run.
 

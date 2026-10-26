@@ -119,11 +119,14 @@ class ConsentLedger:
         provider: str,
         sensitivity: Sensitivity,
         now: dt.datetime | None = None,
+        grants: list[Grant] | None = None,
     ) -> tuple[bool, str]:
+        """`grants` lets a caller deciding many items at once read the ledger once."""
         now = now or utcnow()
         if purpose == "egress" and sensitivity is Sensitivity.SECRET:
             return False, "secret"
-        matching = [g for g in self.grants(user_id) if g.active(now) and g.covers(source, purpose, provider)]
+        grants = self.grants(user_id) if grants is None else grants
+        matching = [g for g in grants if g.active(now) and g.covers(source, purpose, provider)]
         if not matching:
             return False, f"no-{purpose}-grant"
         if not any(sensitivity.rank <= g.max_sensitivity.rank for g in matching):

@@ -168,6 +168,7 @@ class TemporalMemory:
         if old.id not in res.superseded:  # un-keyed item: close it explicitly
             self.store.update_item_meta(old.id, superseded_at=utcnow(), superseded_by=res.item.id)
             res.superseded.append(old.id)
+        self.audit.append(user_id, "memory.correct", item=old.id, by=res.item.id)
         return res
 
     def confirm(self, user_id: str, item_id: str, promote: bool = True) -> MemoryItem:
@@ -271,9 +272,11 @@ class TemporalMemory:
         return out
 
     def embeddings(self, user_id: str) -> tuple[list[str], np.ndarray | None]:
-        if user_id not in self._index:
-            self._index[user_id] = self.store.item_embeddings(user_id)
-        return self._index[user_id]
+        gen = self.store.items_generation()  # also changes when another process writes
+        hit = self._index.get(user_id)
+        if hit is None or hit[0] != gen:
+            hit = self._index[user_id] = (gen, *self.store.item_embeddings(user_id))
+        return hit[1], hit[2]
 
     def search(self, user_id: str, query: str, k: int = 10, now: dt.datetime | None = None) -> list[tuple[MemoryItem, float]]:
         ids, mat = self.embeddings(user_id)

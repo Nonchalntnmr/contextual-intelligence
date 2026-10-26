@@ -20,7 +20,9 @@ outcomes which context actually helps, and can prove what it sent and what it de
 | **Milestone 1, the brief's sixteen-step demonstration**: one model starts a project, the app restarts, a different model continues without re-explaining, a claim is verified independently, an approved reversible edit runs, revoking a provider blocks it (`docs/MILESTONE1_RESULTS.md`) | **passes offline** (`tests/test_milestone1_demo.py`, Anthropic and OpenAI on recorded wire formats) and **passed 16/16 live** with Claude Opus 5.5 and Haiku 5.5 through the local Claude Code login (all Anthropic: cross-model, not yet cross-vendor) |
 | **Cross-model layer**: per-project provider access checked before every model step; disclosure log of what each provider was sent; claim and evidence ledger where model agreement is never verification; context exchange gateway with the brief's `AgentMessage` format; deterministic, explained routing (`exchange.py`, `registry.py`) | working, tested |
 | **`claude-cli` adapter**: real model calls through `claude -p` with its tools, MCP servers, settings and hooks off; CI's tools through a JSON protocol, every call governed by CI (`adapters/claude_cli.py`) | working **live** |
-| **Workspace slice**: projects, notes with provenance, sessions that resume from a compiled briefing, governed tools (read/list/search/git status/run tests/write/note/claim), durable task queue with approvals, expiry, cancel, undo, halt; three autonomy modes enforced server-side (`workspace.py`, `governor.py`, `tools.py`, `tasks.py`, `agent.py`) | working, tested (81 tests in total); run on a live server with a restart in the middle |
+| **Workspace slice**: projects, notes with provenance, sessions that resume from a compiled briefing, governed tools (read/list/search/git status/run tests/write/note/claim), durable task queue with approvals, expiry, cancel, undo, halt; three autonomy modes enforced server-side (`workspace.py`, `governor.py`, `tools.py`, `tasks.py`, `agent.py`) | working, tested (115 tests in total); run on a live server with a restart in the middle |
+| **Engineering hardening (2026-10-26)**: bounded agent turns (rounds, tool calls, time, cost, tokens), durable rounds, no lost updates under concurrency, idempotent tool calls, project-scoped memory, explained context selection, a timeout on model-written regexes, cross-user isolation tests; CI's own overhead per turn down 6.5× at 3,000 memories (`docs/CI_ENGINEERING_AUDIT.md`, `docs/CI_BENCHMARKS.md`) | working, tested, measured |
+| **E1 evaluation**: CI vs no context vs naive history on 24 fixed tasks, preregistered (`experiments/e1/`) | **CI beats no context** (46/48 vs 18/48, Haiku 5.5). **CI does not beat naive history on success** (46 vs 44, p = 0.69), but keeps private, injected and stale content out of 100% of prompts, where naive history sends all of it. Selection is not yet relevance-selective (it sends 57% more tokens) |
 | MCP server `pcim-mcp`: briefing, consent-filtered context, gated memory, notes, outcomes (`mcp_server.py`) | working against an in-memory MCP client; **not yet registered with a real agent** |
 | Temporal memory: bitemporal, supersession vs correction, conflicts, TTLs, lineage (`memory.py`) | working, tested |
 | Sovereignty: per-record encryption with crypto-shredding, consent per source × provider, lineage-aware egress, hash-chained audit, injection write-gating (`sovereignty/`) | working, tested |
@@ -30,7 +32,7 @@ outcomes which context actually helps, and can prove what it sent and what it de
 | Mock model and mock agent | labelled test doubles, not models; they say so in every reply |
 | Assistance-mode bandit, knowledge tracing, intent and VOI | experimental: implemented and unit-tested, not validated on people |
 | FastAPI backend + dashboard (Workspace, Autonomy, Memory, Consent, Receipts, Audit) + `pcim` CLI | working on localhost |
-| Streaming to the UI, scheduled background work, OS-level sandbox, Postgres/pgvector, multi-user hosting | **not built**; see `docs/THREAT_MODEL.md` and `docs/IMPLEMENTATION_PLAN.md` |
+| Streaming to the UI, scheduled background work, OS-level sandbox, Postgres/pgvector, multi-user hosting | **not built**; see `docs/CI_SECURITY_MODEL.md` and `docs/CI_ROADMAP.md` |
 
 **Stack decisions**, which deviate from the brief on purpose:
 
@@ -44,7 +46,7 @@ outcomes which context actually helps, and can prove what it sent and what it de
 
 ```bash
 cd ~/projects/contextual-intelligence
-.venv/bin/python -m pytest -q                       # 81 tests, ~5 s
+.venv/bin/python -m pytest -q                       # 115 tests, ~8 s
 export PCIM_HOME=~/.pcim                             # where your encrypted store lives
 .venv/bin/pcim init --user nishanth --providers mock
 .venv/bin/pcim remember "I prefer concise answers" --kind preference
@@ -78,13 +80,17 @@ run twice.
 
 ## Docs
 
-- These docs cover the workspace slice and the cross-model layer: what existed, what was built, the governor and exchange rules, every threat with its control, test and residual risk, and what each test layer proves:
-  - `docs/EXISTING_SYSTEM_AUDIT.md`
-  - `docs/CI_ARCHITECTURE.md`
-  - `docs/IMPLEMENTATION_PLAN.md`
-  - `docs/THREAT_MODEL.md`
-  - `docs/TEST_STRATEGY.md`
-- `docs/MILESTONE1_RESULTS.md` covers the three live runs, including the two that did not pass and what they found.
+- **Start with these five:**
+  - `docs/CI_ARCHITECTURE.md`: components, dependency graph, the request lifecycle traced through the code, trust boundaries, and where the code differs from the intended design.
+  - `docs/CI_ENGINEERING_AUDIT.md`: every significant issue found, with severity, root cause, fix and the test or measurement that verifies it, plus what remains open.
+  - `docs/CI_SECURITY_MODEL.md`: threats, controls and their tests; consent enforcement; memory isolation; MCP; the data lifecycle and exactly what deletion does and does not reach.
+  - `docs/CI_BENCHMARKS.md`: CI's own overhead before and after, live latency and cost, and the E1 evaluation.
+  - `docs/CI_ROADMAP.md`: what comes next and what result would show it worked.
+- **Supporting:**
+  - `docs/TEST_STRATEGY.md`: what each test layer proves.
+  - `docs/MILESTONE1_RESULTS.md`: the live runs, including the ones that did not pass.
+  - `experiments/e1/REPORT.md`: the evaluation, with its misgrades.
+  - `docs/EXISTING_SYSTEM_AUDIT.md`, `docs/IMPLEMENTATION_PLAN.md`: the earlier audits and plans, kept as history.
 
 - `docs/RESEARCH.md` covers feasibility, the PCIM architecture with its math, the G0
   evidence, the G1–G3 programme, falsifiable hypotheses, the roadmap and the evidence bar.
