@@ -1,5 +1,8 @@
 # Existing system audit
 
+> The current, complete issue list is `CI_ENGINEERING_AUDIT.md`. This file keeps the earlier
+> audits as history. References here to `THREAT_MODEL.md` now point to `CI_SECURITY_MODEL.md`.
+
 ## Re-audit, 2026-10-24 (before milestone 1: cross-model exchange)
 
 **State:**

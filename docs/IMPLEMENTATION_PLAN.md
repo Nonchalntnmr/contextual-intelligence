@@ -35,7 +35,7 @@ revocation holds.
 | 7 Distribution: SDK and MCP | MCP server exists (read-mostly, now provider-gated). **TypeScript SDK not started** |
 | 8 Evaluation | **not started.** The harness design is in `RESEARCH.md` (G1–G3). Nothing has been measured |
 
-## Next milestones, in order
+## Next milestones, in order (as of 2026-10-24; superseded by `CI_ROADMAP.md`)
 
 1. **A second vendor, live.** Set `OPENAI_API_KEY` and `PCIM_OPENAI_MODEL`, and re-run
    `scripts/milestone1_live.py` with Provider B on OpenAI. That turns "cross-model" into
