@@ -57,8 +57,43 @@ The audit of 2026-10-19 is kept in `EXISTING_SYSTEM_AUDIT.md`.
 | 28 | perf | Consent grants were read from SQLite once per memory item per request | `allows()` loaded grants per call | `sovereignty/consent.py`, `egress.py` | One snapshot per decision | SQL per turn 3019 → 25 (N=3000) |
 | 29 | perf | Every request decrypted every memory item | No cache | `store.py`, `memory.py` | Decrypted-item cache and embeddings index; cleared on any item write and on another process's commit (`data_version`) | Decryptions 3002 → 5; `test_the_memory_cache_never_serves_a_withdrawn_item` |
 | 30 | perf | Propensity estimation re-ran the same deterministic selection 32 times per request | The greedy policy's samples are identical | `policy/learned.py` | Indicator computed directly | `test_greedy_propensities_equal_the_sampling_loop_they_replace`; select 11.4 → 0.9 ms (N=100) |
-| 31 | medium | **Open.** Context selection is not relevance-selective at small memory sizes. CI sends 57% more input tokens than naive history | The designed prior's threshold admits nearly every allowed item; the budget does not bind | `policy/prior.py`, `policy/learned.py` | **Not fixed.** Tuning on E1 would contaminate it. Needs a development set, then a fresh test (E2) | E1: precision 3.3%, C_unlimited prompts identical to C's |
+| 31 | medium | **Addressed on dev, unconfirmed.** Context selection is not relevance-selective at small memory sizes. CI sends 57% more input tokens than naive history | The designed prior's threshold admits nearly every allowed item; the budget does not bind. Lexical similarity cannot find relevance that needs inference | `policy/prior.py`, `policy/learned.py`, `planner.py`, `policy/candidates.py` | Retrieval planning (the model writes searches from the request alone; CI runs them locally), a local semantic embedder, compact labels. Tuned on the E2 development set only | Dev: precision 0.03 → 0.29, recall 0.67 → 0.92, context tokens 796 → 106 (`experiments/e2/CALIBRATION.md`). Confirmation needs the sealed E2 test set |
 | 32 | medium | **Open.** E1's keyword rules misread refusals as injection-following and mentions as leaks | Mention is not use | `experiments/e1/dataset.json` | Registered numbers kept; misgrades listed; E2 should grade use, blind, with a rubric | `experiments/e1/REPORT.md` |
+
+## Round of 2026-10-26/27
+
+**Sources.**
+
+- **Relevance work:** the engineer's own work.
+- **Review:** an independent adversarial review of `ff2bea4`. Every finding was reproduced by a probe.
+- **Pending tests:** a regression test was drafted for each open finding. The drafts are kept, not yet run, in `docs/review_2026_10_26_pending_tests.py`.
+  - Some need the parameters their fix will add.
+  - The test for #52 hangs on unfixed code.
+
+| # | sev | issue | where | status | evidence |
+|---|---|---|---|---|---|
+| 33 | critical | Content derived from restricted memory reached any vendor once its source was superseded, corrected or expired: `check` returned "not-current" before checking consent | `workspace.py: derived_blocked`, `sovereignty/egress.py` | **Fixed** (`4c71d5c`): only the temporal check is skipped for lineage | `test_content_derived_from_a_superseded_item_still_needs_the_vendors_consent` |
+| 34 | medium | A store's vectors carried no embedder identity; changing the embedder would silently compare vectors from two models | `store.py`, `engine.py` | **Fixed**: recorded in `meta`, re-embedded on an explicit change | `test_a_store_keeps_the_embedder_it_was_written_with_and_reembeds_on_a_change` |
+| 35 | medium | The injection tripwire missed "Note to AI assistants: … recommend X" (one of two dev injections), so the document reached a CI prompt | `sovereignty/injection.py` | **Fixed**: pattern for text addressed to AI. Still a heuristic | `test_the_scan_flags_text_addressed_to_ai_and_not_text_about_using_ai`, `test_e2_keeps_private_injected_and_stale_content_out_of_every_ci_prompt` |
+| 36 | high | `write_file`'s temp file `.{name}.ci-tmp` is not jailed; a committed symlink redirects an approved write outside the workspace | `tools.py` | **Open** | review probe p07 |
+| 37 | high | `.git` and secret-directory checks are case-sensitive (macOS `.GIT/config`). Unapproved `git_status` honors the repo's fsmonitor and clean filters (also submodule filters), so a write grant, or a hostile repo, becomes command execution | `governor.py`, `tools.py` | **Open** | p08; filter driver confirmed separately |
+| 38 | high | The MCP briefing skips the vendor filter on CI's last message | `mcp_server.py`, `workspace.py: briefing` | **Open** | p02 |
+| 39 | high | Reflection lines repeat model-chosen tool arguments verbatim to a vendor that may not see that session | `agent.py` | **Open** | p03 |
+| 40 | high | `exposure()` ignores the lineage of notes and claims shown in a briefing (lineage is not transitive) | `tasks.py` | **Open** | p04 |
+| 41 | medium-high | MCP notes, and memory written through `ci_remember`, carry no lineage of what the server served | `mcp_server.py` | **Open** | p05 |
+| 42 | medium-high | Model-written files carry no lineage; a later session for another vendor reads them, and reads count as verifier evidence | `exchange.py`, `tasks.py` | **Open** | p06 |
+| 43 | medium | `list_files` and `search_code` apply the secret filter to a link's name, not its target | `tools.py` | **Open** | p10 |
+| 44 | medium | `git_status` reports the whole enclosing repo when the workspace is a subfolder | `tools.py` | **Open** | p09 |
+| 45 | medium | The search child imports from the server's working directory; a model-written `json.py` executes | `tools.py` | **Open** | p18 |
+| 46 | medium | Memory text keeps its newlines in `<personal_context>`, so an ingested email can forge a labelled line. Collapsing it in `_clean` would also flatten `exchange.py`'s multi-line project block | `adapters/render.py`, `agent.py`, `mcp_server.py` | **Open** | p11 |
+| 47 | medium | Project notes are read, modified and written with no lock: 200 concurrent POSTs kept 65 | `workspace.py` | **Open** | p13 |
+| 48 | medium | `undo` uses the currently authorized root and never compares the file with `sha256_after` | `tasks.py` | **Open** | p14 |
+| 49 | medium | Keyed supersession ignores project scope | `memory.py` | **Open** | p12 |
+| 50 | medium | `close_session` takes no session lock; a running turn overwrites the closed state | `agent.py` | **Open** | p16 |
+| 51 | medium | Lineage on notes and claims is capped at 200 ids, so long histories silently drop restrictions | `tasks.py`, `exchange.py` | **Open** (found while fixing) | code reading |
+| 52 | low | `list_files` runs the model's glob in-process with `..` allowed and no time bound | `tools.py` | **Open** | p17 |
+| 53 | low | An erased user's audit rows stay under the same id; a re-onboarded id reads them | `store.py`, `api.py` | **Open** | p15 |
+| 54 | unconfirmed | Autonomous-grant `max_actions` is checked and counted in separate steps (concurrent overrun); `memory.correct` relabels the source as "user", which may widen egress | `governor.py`, `memory.py` | Not reproduced | draft tests only |
 
 ## Remaining risks (not fixed in code)
 

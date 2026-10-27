@@ -5,6 +5,14 @@ it worked. Nothing here is a claim that it will work.
 
 ## Immediate: next two to four weeks
 
+0. **Close the open review findings (audit #36–#54) before new features.**
+   - **First, the high-severity ones (#36–#40):** a jail escape, command execution through git, and three vendor-filter gaps.
+   - **Ready to use:** drafted regression tests in `docs/review_2026_10_26_pending_tests.py`.
+   - **Done when:** each draft is in `tests/`, failed before its fix, and passes after it.
+1. **Confirm relevance-selective selection on the sealed E2 test set.**
+   - **Status (2026-10-27):** retrieval planning plus local semantic retrieval reached precision 0.29 and recall 0.92 on the development set (`experiments/e2/CALIBRATION.md`).
+   - **Next:** write `experiments/e2/PREREGISTRATION.md` and its hashes, then run Haiku and Sonnet with a blind Opus grader.
+   - The original plan follows.
 1. **Make context selection relevance-selective.**
    - **Motivation:** E1 measured context precision of 3.3%, and the budget never binds. CI sends 57% more input tokens than naive history and ties it on cost per success.
    - **Plan:**
