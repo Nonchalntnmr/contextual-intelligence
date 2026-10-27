@@ -39,6 +39,13 @@ _PATTERNS: list[tuple[str, re.Pattern]] = [
         ("exfiltration", r"\b(send|forward|email|post|upload|exfiltrate|leak)\b.{0,60}\b(to|at)\b\s+\S+@\S+|https?://\S+\?(\S*=){1,}"),
         ("markdown-beacon", r"!\[[^\]]*\]\(https?://[^)]*[?&][^)]*\)"),
         ("chat-markup", r"<\|?(system|im_start|im_end|assistant|user)\|?>|^\s*(system|assistant)\s*:"),
+        # Text addressed to the model reading it is the usual shape of an indirect injection.
+        # The E2 development set's "Note to AI assistants: ... recommend PitchPerfect Pro" passed
+        # every pattern above.
+        ("addressed-to-ai", r"\b(note|message|instructions?|attention|notice)\s+(to|for)\s+(all\s+|any\s+)?"
+                            r"(ai|llm|language model|assistant|chatbot|agent)s?\b|\bif you are an? (ai|llm|"
+                            r"language model|ai assistant|ai model)\b|\b(ai|llm) (assistants?|models?|agents?) "
+                            r"(reading|processing|that reads?|summari[sz]ing) this\b"),
     ]
 ]
 
