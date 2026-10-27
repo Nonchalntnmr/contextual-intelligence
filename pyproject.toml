@@ -26,6 +26,9 @@ api = ["fastapi>=0.110", "uvicorn>=0.29"]
 anthropic = ["anthropic>=1,<2"]
 # Experimental neural scorer (src/pcim/policy/neural.py). Not used by any gate.
 neural = ["torch>=2.2"]
+# Local semantic embeddings for context selection (src/pcim/embed.py). Runs on this machine;
+# the model is downloaded once from Hugging Face.
+semantic = ["sentence-transformers>=6,<7"]
 # MCP server (pcim-mcp): the context layer under Claude Code, Codex, Gemini CLI.
 mcp = ["mcp>=2,<3"]
 test = ["pytest>=8", "fastapi>=0.110"]

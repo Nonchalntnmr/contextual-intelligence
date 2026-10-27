@@ -18,6 +18,7 @@ _NOTE = re.compile(r"^\[(\d+)\] \(([^)]*)\) (.*)$", re.MULTILINE)
 
 class MockAdapter:
     provider = "mock"
+    can_plan = False  # it reports what it was given; it cannot plan retrieval (planner.py)
 
     def __init__(self, model: str = "mock-1"):
         self.model = model

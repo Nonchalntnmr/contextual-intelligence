@@ -49,7 +49,8 @@ def test_the_selection_record_explains_without_carrying_content(tmp_path):
     assert sel and set(sel[0]) == {"id", "selected", "kind", "pinned", "similarity", "age_days", "confidence",
                                    "tokens", "score"}
     assert "25bps" not in str(sel)
-    assert "the person said this" in str(agent.adapter("mock", None).requests[-1])
+    # the prompt itself carries the note, labelled by kind and date (what the person said is unlabelled)
+    assert re.search(r"\(constraint · \d{4}-\d{2}-\d{2}\) Uses 25bps", str(agent.adapter("mock", None).requests[-1]))
 
 
 # ---------------------------------------------------------------- another user on the same server

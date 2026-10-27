@@ -29,7 +29,8 @@ PREAMBLE = (
     "- Never claim to remember anything that is not in the notes or the conversation.\n"
     "- If notes conflict with each other or with the request, say so briefly and ask rather "
     "than silently choosing. Newer notes generally supersede older ones.\n"
-    "- When a note's confidence is below 0.7, treat it as a guess about the person."
+    "- A note's label gives its kind and date, says where it came from unless the person said it, "
+    "and shows a confidence only when it is below 0.7: treat such a note as a guess about the person."
 )
 
 _FENCE = re.compile(r"</?\s*personal_context", re.IGNORECASE)
@@ -47,8 +48,14 @@ TRUST_WORDS = {
 
 
 def _label(i: PacketItem) -> str:
-    bits = [i.kind, TRUST_WORDS.get(i.trust, i.trust.replace("_", "-")), f"since {i.valid_from[:10]}",
-            f"confidence {i.confidence:.2f}"]
+    # Compact: E1 spent about a fifth of CI's prompt on labels that repeated "the person
+    # said this · confidence 1.00" on nearly every note. What the person said is the default
+    # and goes unlabelled; every other source, and any low confidence, is still spelled out.
+    bits = [i.kind, i.valid_from[:10]]
+    if i.trust != "user_stated":
+        bits.append(TRUST_WORDS.get(i.trust, i.trust.replace("_", "-")))
+    if i.confidence < 0.7:
+        bits.append(f"confidence {i.confidence:.2f}")
     if i.conflicted:
         bits.append("CONFLICTS with another note; unresolved")
     if i.confirmed_instructions:

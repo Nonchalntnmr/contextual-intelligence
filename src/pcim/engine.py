@@ -30,13 +30,14 @@ import numpy as np
 
 from .adapters import ContextPacket, PacketItem, get_adapter, render
 from .assist import DIRECTIVES, AssistPolicy
-from .embed import Embedder, HashingEmbedder
+from .embed import HASHING_NAME, Embedder, default_embedder_name, embedder_from_name
 from .feedback import reward_from_signals
 from .growth import BKT, next_challenge
 from .intent import classify_task
 from .learning import ContinualLearner
 from .memory import TemporalMemory, effective_confidence
-from .policy.candidates import build_candidates
+from .planner import plan_queries
+from .policy.candidates import build_candidates, build_planned_candidates
 from .policy.learned import PopulationPrior
 from .policy.prior import designed_prior
 from .profile import intelligence_dna
@@ -71,6 +72,7 @@ class ContextSelection:
     memories: list
     explain: list = dataclasses.field(default_factory=list)  # per candidate: ids and numbers, no content
     out_of_scope: int = 0  # current items scoped to another project, never candidates here
+    queries: list | None = None  # the retrieval plan, when there was one (planner.py)
 
 
 SCOPE_PREFIX = "project:"
@@ -86,6 +88,28 @@ def _hash_token(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
 
 
+EMBEDDER_META = "embedder"
+
+
+def bind_embedder(store: Store, embedder: Embedder | None, audit: AuditLog) -> Embedder:
+    """The embedder whose vectors this store holds.
+
+    With none given, a store keeps the one it was written with ($PCIM_EMBEDDER only picks
+    it for a new store), so a CLI next to the server never mixes spaces. A different one
+    given explicitly re-embeds every item first."""
+    recorded = store.get_meta(EMBEDDER_META)
+    if recorded is None and store.count_items():
+        recorded = HASHING_NAME  # every store written before the embedder was recorded
+    if embedder is None:
+        embedder = embedder_from_name(recorded or default_embedder_name())
+    if recorded is not None and recorded != embedder.name:
+        n = store.reembed_items(embedder.embed)
+        audit.append("system", "memory.reembed", embedder_from=recorded, embedder_to=embedder.name, items=n)
+    if recorded != embedder.name:
+        store.set_meta(EMBEDDER_META, embedder.name)
+    return embedder
+
+
 class PersonalCI:
     def __init__(
         self,
@@ -97,6 +121,7 @@ class PersonalCI:
         budget_tokens: int = 1200,
         propensity_samples: int = 32,
         seed: int | None = None,
+        plan_context: bool = True,
     ):
         if store is None:
             if data_dir is None:
@@ -106,13 +131,14 @@ class PersonalCI:
                 d.mkdir(parents=True, exist_ok=True)
                 store = Store(d / "pcim.db", KeyRing.load_or_create(d / "master.key"))
         self.store = store
-        self.embedder = embedder or HashingEmbedder()
         self.audit = AuditLog(store)
+        self.embedder = bind_embedder(store, embedder, self.audit)
         self.ledger = ConsentLedger(store, self.audit)
         self.egress = EgressGuard(store, self.ledger, self.audit)
         self.memory = TemporalMemory(store, self.embedder, self.audit, self.ledger)
         self.learner = ContinualLearner(store, self.audit, prior or designed_prior())
         self.budget_tokens = budget_tokens
+        self.plan_context = plan_context  # ask() plans retrieval with the answering model when it can
         self.propensity_samples = propensity_samples
         self.rng = np.random.default_rng(seed)
         self._adapters: dict[tuple[str, str | None], object] = {}
@@ -208,11 +234,13 @@ class PersonalCI:
         self.audit.append(user_id, "assist.growth_goals", task_types=sorted(task_types))
 
     def select_context(self, user_id: str, task: str, provider: str, model_label: str, budget: int,
-                       ref: str, project_id: str | None = None) -> "ContextSelection":
+                       ref: str, project_id: str | None = None, queries: list[str] | None = None) -> "ContextSelection":
         """C → scope → B → egress → D: what this provider may see, and what the policy chose from it.
 
         Memory scoped to a project is a candidate only for that project; with no project
-        (a one-shot ask, an MCP request without one) only user-wide memory is."""
+        (a one-shot ask, an MCP request without one) only user-wide memory is. With
+        `queries` (a retrieval plan, planner.py) candidates are what those searches and the
+        request find; without, they come from the unplanned channels."""
         if self.store.get_user(user_id) is None:
             raise KeyError(f"unknown user {user_id}")
         now = utcnow()
@@ -227,7 +255,14 @@ class PersonalCI:
         # egress before policy: the policy never learns to rely on what it may not send.
         # Consent is per vendor (who receives the data), not per transport.
         decision = self.egress.filter(user_id, current, vendor_of(provider), model_label, ref=ref)
-        cs = build_candidates(decision.allowed, emb, task_emb, effective_confidence, now)
+        band = self.embedder.relevance_band
+        if not self.embedder.planned_retrieval:
+            queries = None  # an embedder not calibrated for planned searches would find nothing
+        if queries is None:
+            cs = build_candidates(decision.allowed, emb, task_emb, effective_confidence, now, band=band)
+        else:
+            q_emb = self.embedder.embed(queries) if queries else np.zeros((0, task_emb.shape[0]))
+            cs = build_planned_candidates(decision.allowed, emb, task_emb, q_emb, effective_confidence, now, band=band)
         pol = self.learner.policy_for(user_id)
         sel = pol.select(cs, p_vec, budget, self.rng, propensity_samples=self.propensity_samples)
         chosen = [by_id[cs.ids[j]] for j in sel.idx]
@@ -250,7 +285,7 @@ class PersonalCI:
             probs=probs, task_type=max(probs, key=probs.get), chosen=chosen, sel=sel, policy=pol,
             decision=decision, n_candidates=len(cs),
             profile=[pitem(i) for i in chosen if trusted(i)], memories=[pitem(i) for i in chosen if not trusted(i)],
-            explain=explain, out_of_scope=len(everything) - len(current),
+            explain=explain, out_of_scope=len(everything) - len(current), queries=queries,
         )
 
     def ask(self, user_id: str, task: str, provider: str = "mock", model: str | None = None,
@@ -259,7 +294,13 @@ class PersonalCI:
         now = utcnow()
         adapter = self._adapter(provider, model)
         interaction_id = new_id("int")
-        cx = self.select_context(user_id, task, provider, adapter.model, budget, ref=interaction_id)
+        queries, plan = None, None
+        if self.plan_context and self.embedder.planned_retrieval and getattr(adapter, "can_plan", True):
+            # The planner sees the request only, which this vendor receives anyway (planner.py).
+            queries, plan = plan_queries(adapter, task)
+            self.audit.append(user_id, "context.plan", interaction=interaction_id, provider=provider,
+                              queries=None if queries is None else len(queries))
+        cx = self.select_context(user_id, task, provider, adapter.model, budget, ref=interaction_id, queries=queries)
         probs, task_type, chosen, sel, pol, decision = cx.probs, cx.task_type, cx.chosen, cx.sel, cx.policy, cx.decision
         profile, memories = cx.profile, cx.memories
         cs_len = cx.n_candidates
@@ -273,6 +314,8 @@ class PersonalCI:
         )
         prompt = render(packet)
         resp = adapter.generate(prompt)
+        plan_cost = plan.cost_usd if plan is not None else 0.0
+        cost = None if resp.cost_usd is None or plan_cost is None else resp.cost_usd + plan_cost
 
         # G — log
         props = sel.propensities.tolist() if sel.propensities is not None else []
@@ -283,11 +326,15 @@ class PersonalCI:
                      for i in chosen],
             "withheld_by_egress": [{"id": i, "reason": r} for i, r in decision.blocked],
             "candidates_considered": cs_len,
+            "retrieval_plan": queries,
+            "plan_usage": dataclasses.asdict(plan.usage) if plan is not None else None,
+            "embedder": self.embedder.name,
             "selection": cx.explain,
             "out_of_scope": cx.out_of_scope,
             "context_tokens": int(sum(i.tokens for i in chosen)),
             "budget": budget, "policy": pol.name, "policy_version": pol.version,
-            "usage": dataclasses.asdict(resp.usage), "cost_usd": resp.cost_usd, "latency_ms": round(resp.latency_ms, 1),
+            "usage": dataclasses.asdict(resp.usage), "cost_usd": cost,
+            "latency_ms": round(resp.latency_ms + (plan.latency_ms if plan is not None else 0.0), 1),
             "stop_reason": resp.stop_reason, "refusal": resp.refusal, "prompt_sha256": prompt.digest(),
             "egress_audit_hash": decision.audit_hash,
         }
@@ -299,13 +346,13 @@ class PersonalCI:
                 "x_vector": sel.x.tolist() if sel.x is not None else None,
                 "tokens_context": receipt["context_tokens"], "tokens_in": resp.usage.input_tokens,
                 "tokens_out": resp.usage.output_tokens, "cache_read": resp.usage.cache_read_tokens,
-                "cost_usd": resp.cost_usd, "latency_ms": resp.latency_ms, "stop_reason": resp.stop_reason,
+                "cost_usd": cost, "latency_ms": receipt["latency_ms"], "stop_reason": resp.stop_reason,
                 "packet_hash": prompt.digest(),
             },
             task_text=task, response_text=resp.text, receipt=receipt,
         )
         self.audit.append(user_id, "model.call", interaction=interaction_id, provider=provider, model=resp.model,
-                          items=len(chosen), prompt_sha256=prompt.digest(), cost_usd=resp.cost_usd)
+                          items=len(chosen), prompt_sha256=prompt.digest(), cost_usd=cost)
         return AskResult(interaction_id, resp.text, receipt)
 
     def feedback(self, user_id: str, interaction_id: str, **signals) -> float | None:

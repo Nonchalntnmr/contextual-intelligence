@@ -31,8 +31,9 @@ N_FEATURES = len(FEATURE_NAMES)  # 39
 N_REGRESSION = N_FEATURES + N_TASK  # + per-task-type intercepts
 
 
-def relevance_ramp(sim: np.ndarray) -> np.ndarray:
-    return np.clip((sim - 0.2) / 0.6, 0.0, 1.0)
+def relevance_ramp(sim: np.ndarray, band: tuple[float, float] = (0.2, 0.8)) -> np.ndarray:
+    lo, hi = band
+    return np.clip((sim - lo) / (hi - lo), 0.0, 1.0)
 
 
 def featurize(cs: CandidateSet, task_probs: np.ndarray) -> np.ndarray:
@@ -40,7 +41,7 @@ def featurize(cs: CandidateSet, task_probs: np.ndarray) -> np.ndarray:
     F = np.zeros((n, N_FEATURES))
     if n == 0:
         return F
-    s = relevance_ramp(cs.sim)
+    s = relevance_ramp(cs.sim, cs.band)
     cell = cs.kind * N_TASK  # row block for the item's kind
     F[:, :N_KIND * N_TASK][np.arange(n)[:, None], cell[:, None] + np.arange(N_TASK)] = (
         task_probs[None, :] * s[:, None]

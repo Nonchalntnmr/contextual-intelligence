@@ -36,6 +36,11 @@ from .sovereignty.crypto import KeyRing, seal, unseal
 from .types import MemoryItem, Sensitivity, Trust, new_id, utcnow
 
 _SCHEMA = """
+CREATE TABLE IF NOT EXISTS meta (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS keys (
   id TEXT PRIMARY KEY,
   user_id TEXT NOT NULL,
@@ -507,6 +512,43 @@ class Store:
                 for r in rows
             ]
             return [r["id"] for r in rows], np.vstack(vecs)
+
+    def count_items(self) -> int:
+        with self._lock:
+            return self._db.execute("SELECT COUNT(*) FROM items").fetchone()[0]
+
+    def reembed_items(self, embed, batch: int = 256) -> int:
+        """Replace every item's embedding with `embed(contents)`, in one transaction.
+
+        Needed when the embedder changes: vectors from two models are not comparable, and a
+        store that mixed them would rank by noise without any error."""
+        with self._lock:
+            rows = self._db.execute("SELECT id, key_id, payload_ct FROM items").fetchall()
+            self._db.execute("BEGIN")
+            try:
+                for start in range(0, len(rows), batch):
+                    chunk = rows[start:start + batch]
+                    texts = [json.loads(unseal(self._dek(r["key_id"]), r["payload_ct"], r["id"]))["content"] for r in chunk]
+                    for r, v in zip(chunk, embed(texts)):
+                        ct = seal(self._dek(r["key_id"]), np.asarray(v, dtype=np.float32).tobytes(), r["id"] + "/emb")
+                        self._db.execute("UPDATE items SET embedding_ct=? WHERE id=?", (ct, r["id"]))
+                self._db.execute("COMMIT")
+            except Exception:
+                self._db.execute("ROLLBACK")
+                raise
+            finally:
+                self._items_changed()
+            return len(rows)
+
+    def get_meta(self, key: str) -> str | None:
+        with self._lock:
+            row = self._db.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
+            return row["value"] if row else None
+
+    def set_meta(self, key: str, value: str) -> None:
+        with self._lock:
+            self._db.execute("INSERT INTO meta(key, value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                             (key, value))
 
     def children_of(self, item_id: str) -> list[str]:
         """Items whose lineage names item_id as a parent (derived summaries, extractions)."""
