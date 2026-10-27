@@ -380,14 +380,16 @@ class Workspace:
     def derived_blocked(self, user_id: str, lineage: list[str] | None, vendor: str) -> str | None:
         """Why model-written content derived from these memory items may not go to `vendor`,
         or None. The egress guard decides, as for the items themselves. An item that was later
-        superseded or expired was consented when it was used, so it does not block; one that
-        was retracted or deleted does."""
+        superseded or expired does not block by being old, but its consent and sensitivity are
+        still checked for this vendor; one that was retracted or deleted blocks."""
         for iid in lineage or []:
             item = self.store.get_item(iid)
             if item is None:
                 return f"derived from memory that was deleted ({iid})"
-            ok, why = self.ci.egress.check(user_id, item, vendor)
-            if not ok and not (why == "not-current" and item.status != "retracted"):
+            if item.status == "retracted":
+                return f"derived from {iid}, which {vendor} may not see (retracted)"
+            ok, why = self.ci.egress.check(user_id, item, vendor, require_current=False)
+            if not ok:
                 return f"derived from {iid}, which {vendor} may not see ({why})"
         return None
 

@@ -70,11 +70,14 @@ class EgressGuard:
             frontier, depth = nxt, depth + 1
         return sources, sens, intact
 
-    def check(self, user_id: str, item: MemoryItem, provider: str, grants=None) -> tuple[bool, str]:
+    def check(self, user_id: str, item: MemoryItem, provider: str, grants=None,
+              require_current: bool = True) -> tuple[bool, str]:
+        """`require_current=False` skips only the temporal check: for content a model derived
+        from the item while it was current, which still needs every other check now."""
         now = utcnow()
         if item.sensitivity is Sensitivity.SECRET:
             return False, "secret"
-        if not item.is_current(now):
+        if require_current and not item.is_current(now):
             return False, "not-current"
         if INSTRUCTION_FLAG in item.flags and CONFIRMED_FLAG not in item.flags:
             return False, "unconfirmed-instructions"
