@@ -1,0 +1,122 @@
+{
+ "D03": {
+  "queries": [
+   "coaches Slack channel name and workspace",
+   "fieldday beta project details and tester list",
+   "Slack announcement writing style preferences",
+   "the person's name and role on the fieldday team"
+  ],
+  "raw": "{\"queries\": [\"coaches Slack channel name and workspace\", \"fieldday beta project details and tester list\", \"Slack announcement writing style preferences\", \"the person's name and role on the fieldday team\"]}",
+  "cost_usd": 0.0003502,
+  "tokens_in": 926,
+  "tokens_out": 68,
+  "latency_s": 3.5122571249958128
+ },
+ "D06": {
+  "queries": [
+   "Ivy soccer practice schedule",
+   "Ivy's recurring activities and kids' sports",
+   "Ivy's soccer team and coach"
+  ],
+  "raw": "{\"queries\": [\"Ivy soccer practice schedule\", \"Ivy's recurring activities and kids' sports\", \"Ivy's soccer team and coach\"]}",
+  "cost_usd": 0.00034120000000000005,
+  "tokens_in": 918,
+  "tokens_out": 56,
+  "latency_s": 3.595740165997995
+ },
+ "D10": {
+  "queries": [
+   "the person's current salary and compensation",
+   "the person's job search status and preferences",
+   "the person's current employer and role",
+   "how the person likes recruiter replies written"
+  ],
+  "raw": "{\"queries\": [\"the person's current salary and compensation\", \"the person's job search status and preferences\", \"the person's current employer and role\", \"how the person likes recruiter replies written\"]}",
+  "cost_usd": 0.00034460000000000003,
+  "tokens_in": 931,
+  "tokens_out": 58,
+  "latency_s": 3.6272341670119204
+ },
+ "D12": {
+  "queries": [
+   "fieldday project stack and SMS provider",
+   "fieldday constraints and decisions on messaging",
+   "the person's preferred response format for technical recommendations"
+  ],
+  "raw": "{\"queries\": [\"fieldday project stack and SMS provider\", \"fieldday constraints and decisions on messaging\", \"the person's preferred response format for technical recommendations\"]}",
+  "cost_usd": 0.0002133,
+  "tokens_in": 920,
+  "tokens_out": 59,
+  "latency_s": 3.161989500018535
+ },
+ "D14": {
+  "queries": [
+   "the person's test suite command for their project",
+   "the project's stack and test runner preferences",
+   "the person's shell and development environment setup"
+  ],
+  "raw": "{\"queries\": [\"the person's test suite command for their project\", \"the project's stack and test runner preferences\", \"the person's shell and development environment setup\"]}",
+  "cost_usd": 0.00033130000000000003,
+  "tokens_in": 908,
+  "tokens_out": 49,
+  "latency_s": 3.407334624993382
+ },
+ "D19": {
+  "queries": [
+   "food and drink preferences",
+   "dietary restrictions or allergies",
+   "alcohol preferences and drinking habits",
+   "team happy hour or work social events"
+  ],
+  "raw": "{\"queries\": [\"food and drink preferences\", \"dietary restrictions or allergies\", \"alcohol preferences and drinking habits\", \"team happy hour or work social events\"]}",
+  "cost_usd": 0.0003394,
+  "tokens_in": 910,
+  "tokens_out": 58,
+  "latency_s": 3.3290978750155773
+ },
+ "D23": {
+  "queries": [
+   "youth sports league family fees",
+   "fall field permit fee split",
+   "number of families on the team",
+   "league registration fee amounts"
+  ],
+  "raw": "{\"queries\": [\"youth sports league family fees\", \"fall field permit fee split\", \"number of families on the team\", \"league registration fee amounts\"]}",
+  "cost_usd": 0.0003382,
+  "tokens_in": 926,
+  "tokens_out": 48,
+  "latency_s": 1.8840102080139332
+ },
+ "D27": {
+  "queries": [
+   "plumber the person liked for kitchen repairs",
+   "kitchen faucet plumber name and company",
+   "preferred plumbing contractor recommendations"
+  ],
+  "raw": "{\"queries\": [\"plumber the person liked for kitchen repairs\", \"kitchen faucet plumber name and company\", \"preferred plumbing contractor recommendations\"]}",
+  "cost_usd": 0.0003443000000000001,
+  "tokens_in": 923,
+  "tokens_out": 58,
+  "latency_s": 1.9808321250020526
+ },
+ "D30": {
+  "queries": [
+   "the person's blood type",
+   "the person's medical records and health information",
+   "the person's blood test results"
+  ],
+  "raw": "{\"queries\": [\"the person's blood type\", \"the person's medical records and health information\", \"the person's blood test results\"]}",
+  "cost_usd": 0.00032460000000000003,
+  "tokens_in": 899,
+  "tokens_out": 38,
+  "latency_s": 1.961385208007414
+ },
+ "D34": {
+  "queries": [],
+  "raw": "{\"queries\": []}",
+  "cost_usd": 0.0001863,
+  "tokens_in": 910,
+  "tokens_out": 9,
+  "latency_s": 1.7755438330059405
+ }
+}

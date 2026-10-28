@@ -1,0 +1,15 @@
+{
+ "experiments/e2/test_set.json": "1306eb4b6897221638babdea3d51fd90199865ef6362f62997a5b0de806a968b",
+ "experiments/e2/PREREGISTRATION.md": "63b5a1ba88fad820ac9cb89f88f9067d8bd7c7c3f64aa69713a1c1dbbadf852a",
+ "src/pcim/observatory/e2.py": "ad8abafa8932214130b473354d9f7debfca5ff4cba35b7af3e8c3384f0e623a1",
+ "src/pcim/policy/prior.py": "30c488ad9668e03bcd1fd18d7caebef66ffe1638af0a6a1673aebc23949a1254",
+ "src/pcim/policy/features.py": "70433e0c8ff8078eec49c9b320ee27a4a900aad50edd265b84667dfde35af27a",
+ "src/pcim/policy/select.py": "9608059cec9392d131770fcce7c0ac1ec3693c268525358e0b7d45da2bd5d04e",
+ "src/pcim/policy/candidates.py": "73413a6a2e148e64870e53b0aacfbcc0d5c9a8ee8d22a2eacfa4ceeeeddef912",
+ "src/pcim/adapters/render.py": "cbfbe31cc46f384fa28c032f0d9eeb6a14715608b86aa78b74d874333bed564b",
+ "src/pcim/embed.py": "a82c0592c35514775306dd78b6283663dd278d791205853052f52a60389b56a4",
+ "src/pcim/engine.py": "32d869a1d95ce059e9678789c42603a0f09d5ac8ee0e04483433c38c1b57ddfb",
+ "src/pcim/planner.py": "df645df8ae5f17f44e6cbfa393b6b4c9e0dc4a10e291594b23aaf0347fc555b4",
+ "src/pcim/sovereignty/egress.py": "9f75c6d7381be5493d4531fea7ed9934bb615ba06cc0bb0539deecb47db7f65e",
+ "src/pcim/sovereignty/injection.py": "2b174e9ababf944f495757275ad74f906d5dc0c5560f0d43be9c6dd241ed2df8"
+}

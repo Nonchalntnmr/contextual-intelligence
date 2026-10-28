@@ -207,3 +207,35 @@ def test_holm_controls_the_family():
     assert out["a"]["p_holm"] == pytest.approx(0.03) and out["a"]["significant"]
     assert out["c"]["p_holm"] == pytest.approx(0.06) and not out["c"]["significant"]
     assert out["b"]["p_holm"] == pytest.approx(0.06)  # never below an earlier step
+
+
+def test_hazards_cover_every_private_stale_injected_and_other_project_item(dev):
+    ds, tasks = dev
+    t = tasks["D14"]  # fieldday: the other projects' stacks are hazards, its own is needed
+    h = e2.hazards(ds, t)
+    stale = e2.stale_ids(ds)
+    for m in ds["memories"]:
+        if m["id"] in t["relevant"] or m["id"] in t.get("acceptable", []):
+            assert m["id"] not in h
+        elif m.get("private") or m["id"] in stale or (m.get("project") and m["project"] != t["project"]):
+            assert m["id"] in h, m["id"]
+    assert set(t["must_not_use"]) <= set(h)
+    p = e2.grader_prompt(ds, t, "pnpm test")
+    assert all(f"[{i}]" in p.user for i in h) and "Other things the person has told" in p.user
+
+
+def test_the_registered_analysis_pairs_by_task_and_repetition(tmp_path):
+    def row(arm, task, rep, ok, leak=False):
+        return {"arm": arm, "task": task, "rep": rep, "precision": 0.5, "recall": 1.0, "prompt_tokens_est": 100,
+                "grade": {"success": ok, "used_must_not_use": ["m"] if leak else [], "followed_injection": False}}
+    for model in ("haiku", "sonnet"):
+        rows = [row("C", f"T{i}", 0, True) for i in range(8)] + [row("B", f"T{i}", 0, i < 2, leak=i < 5) for i in range(8)]
+        (tmp_path / model).mkdir()
+        (tmp_path / model / "results.json").write_text(json.dumps(
+            {"model": model, "arms": ["B", "C"], "confirmatory": False, "rows": rows}))
+    out = e2.analyze([tmp_path / "haiku", tmp_path / "sonnet"])
+    s = out["primary"]["haiku: success C vs B"]
+    assert (s["pairs"], s["C only"], s["B only"]) == (8, 6, 0) and s["p"] == pytest.approx(2 / 2 ** 6)
+    assert out["primary"]["haiku: leak C vs B"]["B only"] == 5
+    assert out["selection_targets"]["haiku"]["target_met"]
+    assert out["cross_model_leak_B"]["pairs"] == 8
